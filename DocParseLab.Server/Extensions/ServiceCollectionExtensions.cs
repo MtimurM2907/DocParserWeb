@@ -1,0 +1,153 @@
+using System.Net.Http;
+using System.Security.Cryptography.X509Certificates;
+using System.Text;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.IdentityModel.Tokens;
+using Polly;
+using DocParseLab.Server.Data;
+using DocParseLab.Server.Services;
+
+namespace DocParseLab.Server.Extensions;
+
+/// <summary>
+/// Методы расширения для регистрации сервисов приложения
+/// </summary>
+public static class ServiceCollectionExtensions
+{
+    /// <summary>
+    /// Регистрирует сервисы приложения с настройками для GigaChat
+    /// </summary>
+    public static IServiceCollection AddApplicationServices(this IServiceCollection services, IConfiguration configuration)
+    {
+        services.AddScoped<IPdfParserService, PdfParserService>();
+        services.AddScoped<IDocumentTextExtractor, PdfTextExtractor>();
+        services.AddScoped<IDocumentTextExtractor, DocxTextExtractor>();
+        services.AddScoped<IDocumentExportService, DocumentExportService>();
+        services.AddScoped<ISpellcheckService, AiSpellcheckService>();
+        services.AddScoped<IEmailSender, SmtpEmailSender>();
+        services.AddSingleton<IOcrService, TesseractOcrService>();
+        services.Configure<GigaChatOptions>(configuration.GetSection(GigaChatOptions.SectionName));
+        services.Configure<SmtpOptions>(configuration.GetSection(SmtpOptions.SectionName));
+        services.Configure<OcrOptions>(configuration.GetSection(OcrOptions.SectionName));
+        
+        // Регистрация GigaChat клиента с настройками сертификатов
+        // Polly retry логика реализована внутри GigaChatClient
+        services.AddHttpClient<IGigaChatClient, GigaChatClient>()
+            .ConfigurePrimaryHttpMessageHandler(() =>
+            {
+                var certPath = Path.Combine(AppContext.BaseDirectory, "certs", "russian_trusted_root_ca_pem.crt");
+                var handler = new HttpClientHandler();
+
+                if (!File.Exists(certPath))
+                {
+                    Console.WriteLine($"Предупреждение: сертификат Минцифры не найден по пути: {certPath}");
+                    return handler;
+                }
+
+                try
+                {
+                    var rootCert = X509Certificate2.CreateFromPemFile(certPath);
+
+                    handler.ServerCertificateCustomValidationCallback = (message, cert, chain, errors) =>
+                    {
+                        if (errors == System.Net.Security.SslPolicyErrors.None)
+                            return true;
+
+                        var chain2 = new X509Chain();
+                        chain2.ChainPolicy.ExtraStore.Add(rootCert);
+                        chain2.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;
+                        chain2.ChainPolicy.VerificationFlags = X509VerificationFlags.AllowUnknownCertificateAuthority;
+
+                        if (cert != null && chain2.Build(new X509Certificate2(cert)))
+                        {
+                            if (chain2.ChainElements.Count > 0)
+                            {
+                                var root = chain2.ChainElements[chain2.ChainElements.Count - 1].Certificate;
+                                if (root.Thumbprint == rootCert.Thumbprint)
+                                    return true;
+                            }
+                        }
+
+                        return false;
+                    };
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Не удалось загрузить сертификат Минцифры: {ex.Message}");
+                }
+
+                return handler;
+            });
+        
+        return services;
+    }
+
+    /// <summary>
+    /// Регистрирует базу данных
+    /// </summary>
+    public static IServiceCollection AddDatabase(this IServiceCollection services, IConfiguration configuration)
+    {
+        services.AddDbContext<AppDbContext>(options =>
+            options.UseNpgsql(configuration.GetConnectionString("DefaultConnection")));
+        
+        return services;
+    }
+
+    /// <summary>
+    /// Регистрирует JWT аутентификацию
+    /// </summary>
+    public static IServiceCollection AddJwtAuthentication(this IServiceCollection services, IConfiguration configuration)
+    {
+        var jwtSection = configuration.GetSection("Jwt");
+        var jwtKey = jwtSection["Key"] ?? throw new InvalidOperationException("Jwt:Key is not configured");
+        var signingKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtKey));
+
+        services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+            .AddJwtBearer(options =>
+            {
+                options.TokenValidationParameters = new TokenValidationParameters
+                {
+                    ValidateIssuer = true,
+                    ValidIssuer = jwtSection["Issuer"],
+                    ValidateAudience = true,
+                    ValidAudience = jwtSection["Audience"],
+                    ValidateIssuerSigningKey = true,
+                    IssuerSigningKey = signingKey,
+                    ValidateLifetime = true,
+                    ClockSkew = TimeSpan.FromMinutes(2)
+                };
+            });
+
+        return services;
+    }
+
+    /// <summary>
+    /// Регистрирует CORS политики
+    /// </summary>
+    public static IServiceCollection AddCorsPolicies(this IServiceCollection services, IConfiguration configuration, IWebHostEnvironment environment)
+    {
+        services.AddCors(options =>
+        {
+            if (environment.IsDevelopment())
+            {
+                options.AddDefaultPolicy(policy =>
+                    policy.WithOrigins("https://localhost:53671")
+                        .AllowAnyHeader()
+                        .AllowAnyMethod());
+            }
+            else
+            {
+                var allowedOrigins = configuration.GetSection("AllowedOrigins").Get<string[]>()
+                    ?? new[] { "https://yourdomain.com" };
+
+                options.AddDefaultPolicy(policy =>
+                    policy.WithOrigins(allowedOrigins)
+                        .AllowAnyHeader()
+                        .AllowAnyMethod());
+            }
+        });
+
+        return services;
+    }
+}

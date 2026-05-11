@@ -1,0 +1,29 @@
+{
+  "Logging": {
+    "LogLevel": {
+      "Default": "Information",
+      "Microsoft.AspNetCore": "Warning"
+    }
+  },
+  "AllowedHosts": "*",
+  "AllowedOrigins": [
+    "https://yourdomain.com",
+    "https://www.yourdomain.com"
+  ],
+  "GigaChat": {
+    "AuthUrl": "https://ngw.devices.sberbank.ru:9443/api/v2/oauth",
+    "ApiUrl": "https://gigachat.devices.sberbank.ru/api/v1/chat/completions",
+    "Authorization": "Basic YOUR_BASE64_ENCODED_KEY_HERE",
+    "Scope": "GIGACHAT_API_PERS",
+    "Model": "GigaChat"
+  },
+  "Smtp": {
+    "Host": "smtp.example.com",
+    "Port": 587,
+    "EnableSsl": true,
+    "Username": "noreply@example.com",
+    "Password": "APP_PASSWORD_OR_SMTP_PASSWORD",
+    "FromEmail": "noreply@example.com",
+    "FromName": "DocParseLab"
+  }
+}
