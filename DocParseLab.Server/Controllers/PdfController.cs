@@ -22,19 +22,34 @@ public class PdfController : ControllerBase
     private readonly IDocumentExportService _exportService;
     private readonly IEmailSender _emailSender;
     private readonly ILogger<PdfController> _logger;
+    private readonly IAuditService _audit;
+    private readonly IWebhookService _webhook;
+    private readonly IDocumentAccessService _access;
+    private readonly IDocumentVersionService _versions;
+    private readonly IDocumentSignatureService _signatures;
 
     public PdfController(
         AppDbContext db,
         IPdfParserService parserService,
         IDocumentExportService exportService,
         IEmailSender emailSender,
-        ILogger<PdfController> logger)
+        ILogger<PdfController> logger,
+        IAuditService audit,
+        IWebhookService webhook,
+        IDocumentAccessService access,
+        IDocumentVersionService versions,
+        IDocumentSignatureService signatures)
     {
         _db = db;
         _parserService = parserService;
         _exportService = exportService;
         _emailSender = emailSender;
         _logger = logger;
+        _audit = audit;
+        _webhook = webhook;
+        _access = access;
+        _versions = versions;
+        _signatures = signatures;
     }
 
     /// <summary>
@@ -44,13 +59,17 @@ public class PdfController : ControllerBase
     /// <param name="cancellationToken">Токен отмены</param>
     /// <returns>Распарсенный документ</returns>
     [HttpPost("parse")]
-    [AllowAnonymous]
+    [Authorize]
     [Consumes("multipart/form-data")]
     [RequestSizeLimit(50 * 1024 * 1024)]
     [ProducesResponseType(typeof(ParsedDocumentResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status400BadRequest)]
     [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status500InternalServerError)]
-    public async Task<ActionResult<ParsedDocumentResponse>> Parse(IFormFile file, CancellationToken cancellationToken)
+    public async Task<ActionResult<ParsedDocumentResponse>> Parse(
+        IFormFile file,
+        [FromQuery] string? processingProfile,
+        [FromQuery] string? dataClassification,
+        CancellationToken cancellationToken)
     {
         if (!ModelState.IsValid)
         {
@@ -72,22 +91,32 @@ public class PdfController : ControllerBase
 
         try
         {
-            int? ownerId = User.TryGetUserId(out var ownerUserId) ? ownerUserId : null;
+            if (!User.TryGetUserId(out var ownerUserId))
+                return Unauthorized();
+            var ownerId = ownerUserId;
 
             _logger.LogInformation("Начало парсинга файла {FileName}, размер {Size} байт", 
                 file.FileName, file.Length);
 
-            var result = await _parserService.ParseAndSaveAsync(file, ownerId, cancellationToken);
+            var result = await _parserService.ParseAndSaveAsync(
+                file,
+                ownerId,
+                new DocumentImportContext
+                {
+                    ProcessingProfile = string.IsNullOrWhiteSpace(processingProfile) ? "general" : processingProfile!,
+                    DataClassification = string.IsNullOrWhiteSpace(dataClassification) ? "Internal" : dataClassification!
+                },
+                cancellationToken);
             
             _logger.LogInformation("Файл {FileName} успешно распарсен, ID документа {DocumentId}", 
                 file.FileName, result.Id);
 
-            var ownerEmail = ownerId.HasValue 
-                ? await _db.Users.Where(u => u.Id == ownerId.Value)
-                    .Select(u => u.Email).FirstOrDefaultAsync(cancellationToken) 
-                : null;
+            var ownerEmail = await _db.Users.Where(u => u.Id == ownerId)
+                .Select(u => u.Email).FirstOrDefaultAsync(cancellationToken);
 
-            return Ok(ParsedDocumentResponse.FromEntity(result, ownerEmail));
+            await _audit.LogAsync("document.parse", $"document:{result.Id}", file.FileName, cancellationToken);
+
+            return Ok(await MapDocumentResponseAsync(result, ownerUserId, cancellationToken));
         }
         catch (Exception ex)
         {
@@ -200,6 +229,12 @@ public class PdfController : ControllerBase
         _db.DocumentShares.Add(share);
         await _db.SaveChangesAsync(cancellationToken);
 
+        await _audit.LogAsync("document.share", $"document:{document.Id}", targetEmail, cancellationToken);
+        await _webhook.NotifyAsync(
+            "document.shared",
+            new { documentId = document.Id, toUserId = targetUser.Id, targetEmail },
+            cancellationToken);
+
         _logger.LogInformation("Пользователь {FromUserId} предоставил доступ к документу {DocumentId} пользователю {ToUserId}", 
             currentUserId, document.Id, targetUser.Id);
 
@@ -289,6 +324,7 @@ public class PdfController : ControllerBase
             return StatusCode(StatusCodes.Status502BadGateway, "SMTP ошибка. Проверьте Host/Port/SSL/логин/пароль.");
         }
 
+        await _audit.LogAsync("document.email_send", $"document:{id}", $"{format}:{targetEmail}", cancellationToken);
         return Ok();
     }
 
@@ -310,30 +346,15 @@ public class PdfController : ControllerBase
             return Unauthorized();
         }
 
-        var document = await _db.ParsedDocuments
-            .Include(d => d.Owner)
-            .Include(d => d.Shares)
-                .ThenInclude(s => s.ToUser)
-            .FirstOrDefaultAsync(d => d.Id == id, cancellationToken);
+        var document = await LoadDocumentFullAsync(id, cancellationToken);
 
         if (document == null)
-        {
             return NotFound("Документ не найден.");
-        }
 
-        // Проверка прав доступа
-        bool hasAccess = document.OwnerId == currentUserId || 
-            document.Shares.Any(s => s.ToUserId == currentUserId);
-
-        if (!hasAccess)
-        {
+        if (!await _access.CanReadAsync(currentUserId, document, cancellationToken))
             return Forbid("У вас нет доступа к этому документу.");
-        }
 
-        var ownerEmail = document.Owner?.Email;
-        var shareCount = document.Shares.Count;
-
-        return Ok(ParsedDocumentResponse.FromEntity(document, ownerEmail, shareCount));
+        return Ok(await MapDocumentResponseAsync(document, currentUserId, cancellationToken));
     }
 
     /// <summary>
@@ -357,23 +378,13 @@ public class PdfController : ControllerBase
             return Unauthorized();
         }
 
-        var document = await _db.ParsedDocuments
-            .Include(d => d.Owner)
-            .Include(d => d.Shares)
-            .FirstOrDefaultAsync(d => d.Id == id, cancellationToken);
+        var document = await LoadDocumentFullAsync(id, cancellationToken);
 
         if (document == null)
-        {
             return NotFound(new ErrorResponse { Message = "Документ не найден." });
-        }
 
-        bool hasAccess = document.OwnerId == currentUserId ||
-                         document.Shares.Any(s => s.ToUserId == currentUserId);
-
-        if (!hasAccess)
-        {
-            return Forbid("У вас нет доступа к этому документу.");
-        }
+        if (!await _access.CanEditContentAsync(currentUserId, document, cancellationToken))
+            return Forbid("Редактирование недоступно: нет прав или документ на согласовании.");
 
         var newText = request.Text ?? string.Empty;
         if (newText.Length > 2_000_000)
@@ -391,13 +402,13 @@ public class PdfController : ControllerBase
         {
             document.EditedText = newText;
             document.EditedAt = DateTime.UtcNow;
+            await _versions.SaveVersionAsync(document, currentUserId, newText, "edit", cancellationToken);
         }
 
         await _db.SaveChangesAsync(cancellationToken);
 
-        var ownerEmail = document.Owner?.Email;
-        var shareCount = document.Shares.Count;
-        return Ok(ParsedDocumentResponse.FromEntity(document, ownerEmail, shareCount));
+        await _audit.LogAsync("document.text_update", $"document:{id}", $"len={newText.Length}", cancellationToken);
+        return Ok(await MapDocumentResponseAsync(document, currentUserId, cancellationToken));
     }
 
     [HttpDelete("{id:int}")]
@@ -419,13 +430,13 @@ public class PdfController : ControllerBase
             return NotFound("Документ не найден.");
         }
 
-        if (document.OwnerId != currentUserId)
-        {
-            return Forbid("Удалять документ может только владелец.");
-        }
+        if (!await _access.CanDeleteAsync(currentUserId, document, cancellationToken))
+            return Forbid("Удаление недоступно.");
 
         _db.ParsedDocuments.Remove(document);
         await _db.SaveChangesAsync(cancellationToken);
+        await _audit.LogAsync("document.delete", $"document:{id}", document.FileName, cancellationToken);
+        await _webhook.NotifyAsync("document.deleted", new { documentId = id, fileName = document.FileName }, cancellationToken);
         return NoContent();
     }
 
@@ -458,10 +469,45 @@ public class PdfController : ControllerBase
         if (string.Equals(format, "pdf", StringComparison.OrdinalIgnoreCase))
         {
             var bytes = _exportService.ExportToPdf(safeName, text);
+            await _audit.LogAsync("document.export", $"document:{id}", "pdf", cancellationToken);
+            await _webhook.NotifyAsync("document.exported", new { documentId = id, format = "pdf" }, cancellationToken);
             return File(bytes, "application/pdf", $"{safeName}.pdf");
         }
 
         var docx = _exportService.ExportToDocx(safeName, text);
+        await _audit.LogAsync("document.export", $"document:{id}", "docx", cancellationToken);
+        await _webhook.NotifyAsync("document.exported", new { documentId = id, format = "docx" }, cancellationToken);
         return File(docx, "application/vnd.openxmlformats-officedocument.wordprocessingml.document", $"{safeName}.docx");
+    }
+
+    private async Task<ParsedDocument?> LoadDocumentFullAsync(int id, CancellationToken cancellationToken) =>
+        await _db.ParsedDocuments
+            .Include(d => d.Owner)
+            .Include(d => d.Department)
+            .Include(d => d.ResponsibleUser)
+            .Include(d => d.CurrentApprover)
+            .Include(d => d.Shares)
+            .FirstOrDefaultAsync(d => d.Id == id, cancellationToken);
+
+    private async Task<ParsedDocumentResponse> MapDocumentResponseAsync(
+        ParsedDocument document,
+        int? currentUserId,
+        CancellationToken cancellationToken)
+    {
+        var verify = await _signatures.VerifyAsync(document, cancellationToken);
+        var flags = await _signatures.GetUiFlagsAsync(currentUserId, document, cancellationToken);
+        return ParsedDocumentResponse.FromEntity(
+            document,
+            document.Owner?.Email,
+            document.Shares.Count,
+            currentUserId,
+            document.Department?.Name,
+            document.ResponsibleUser?.Email,
+            document.CurrentApprover?.Email,
+            flags.CanSign,
+            flags.SignatureCount,
+            verify.TextMatchesLastSignature,
+            verify.LastSignedAt,
+            verify.LastSignerEmail);
     }
 }

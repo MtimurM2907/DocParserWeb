@@ -25,5 +25,12 @@
     "Password": "APP_PASSWORD_OR_SMTP_PASSWORD",
     "FromEmail": "noreply@example.com",
     "FromName": "DocParseLab"
+  },
+  "Enterprise": {
+    "WebhookUrl": "",
+    "WebhookSecret": "",
+    "BatchApiKey": "",
+    "EnableAudit": true,
+    "Checklists": []
   }
 }

@@ -1,16 +1,40 @@
 import type {
+  AuditLogEntry,
   AuthResponse,
+  BatchParseResponse,
+  ChecklistValidateResult,
+  ExtractedEntities,
   ParsedDocument,
+  RewriteResponse,
   SpellcheckResponse,
 } from '../types/api';
+import type { UserBrief } from '../types/office';
 import { authHeaders, readResponseError } from '../lib/http';
 
 const jsonContent = { 'Content-Type': 'application/json' };
 
-export async function parseDocument(file: File, token: string | null): Promise<ParsedDocument> {
+export type ParseImportOptions = {
+  processingProfile?: string;
+  dataClassification?: string;
+};
+
+function parseImportQuery(opts?: ParseImportOptions): string {
+  if (!opts) return '';
+  const q = new URLSearchParams();
+  if (opts.processingProfile?.trim()) q.set('processingProfile', opts.processingProfile.trim());
+  if (opts.dataClassification?.trim()) q.set('dataClassification', opts.dataClassification.trim());
+  const s = q.toString();
+  return s ? `?${s}` : '';
+}
+
+export async function parseDocument(
+  file: File,
+  token: string,
+  importOpts?: ParseImportOptions,
+): Promise<ParsedDocument> {
   const formData = new FormData();
   formData.append('file', file);
-  const response = await fetch('/api/pdf/parse', {
+  const response = await fetch(`/api/pdf/parse${parseImportQuery(importOpts)}`, {
     method: 'POST',
     body: formData,
     headers: authHeaders(token),
@@ -21,20 +45,160 @@ export async function parseDocument(file: File, token: string | null): Promise<P
   return response.json() as Promise<ParsedDocument>;
 }
 
-export async function authLoginOrRegister(
-  mode: 'login' | 'register',
-  email: string,
-  password: string,
-): Promise<AuthResponse> {
-  const response = await fetch(`/api/auth/${mode}`, {
+export async function parseBatch(
+  files: File[],
+  token: string,
+  importOpts?: ParseImportOptions,
+  batchApiKey?: string | null,
+): Promise<BatchParseResponse> {
+  const formData = new FormData();
+  for (const f of files) {
+    formData.append('files', f);
+  }
+  if (importOpts?.processingProfile?.trim()) {
+    formData.append('processingProfile', importOpts.processingProfile.trim());
+  }
+  if (importOpts?.dataClassification?.trim()) {
+    formData.append('dataClassification', importOpts.dataClassification.trim());
+  }
+  const headers = new Headers(authHeaders(token) as HeadersInit);
+  if (batchApiKey?.trim()) {
+    headers.set('X-Enterprise-Batch-Key', batchApiKey.trim());
+  }
+  const response = await fetch('/api/enterprise/parse-batch', {
+    method: 'POST',
+    body: formData,
+    headers,
+  });
+  if (!response.ok) {
+    throw new Error(await readResponseError(response, 'Ошибка пакетной загрузки'));
+  }
+  return response.json() as Promise<BatchParseResponse>;
+}
+
+export async function fetchAuditLog(
+  token: string,
+  opts?: { take?: number; all?: boolean },
+): Promise<AuditLogEntry[]> {
+  const q = new URLSearchParams();
+  const take = opts?.take ?? 100;
+  q.set('take', String(take));
+  if (opts?.all) q.set('all', 'true');
+  const response = await fetch(`/api/enterprise/audit?${q}`, { headers: authHeaders(token) });
+  if (!response.ok) {
+    throw new Error(await readResponseError(response, 'Не удалось загрузить журнал'));
+  }
+  return response.json() as Promise<AuditLogEntry[]>;
+}
+
+export type RewriteTextParams = {
+  text: string;
+  mode?: string;
+  tone?: string;
+  length?: string;
+  documentId?: number;
+  token: string;
+};
+
+export async function rewriteText(params: RewriteTextParams): Promise<RewriteResponse> {
+  const body: Record<string, unknown> = {
+    text: params.text,
+    mode: params.mode ?? 'Более формально',
+    tone: params.tone ?? 'нейтральный',
+    length: params.length ?? 'сопоставимая с оригиналом',
+  };
+  if (params.documentId != null) {
+    body.documentId = params.documentId;
+  }
+  const response = await fetch('/api/ai/rewrite', {
+    method: 'POST',
+    headers: { ...jsonContent, ...authHeaders(params.token) },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) {
+    throw new Error(await readResponseError(response, 'Не удалось переписать текст'));
+  }
+  return response.json() as Promise<RewriteResponse>;
+}
+
+export async function fetchDocumentEntities(token: string, docId: number): Promise<ExtractedEntities> {
+  const response = await fetch(`/api/enterprise/documents/${docId}/entities`, { headers: authHeaders(token) });
+  if (!response.ok) {
+    throw new Error(await readResponseError(response, 'Не удалось извлечь сущности'));
+  }
+  return response.json() as Promise<ExtractedEntities>;
+}
+
+export async function validateDocumentChecklist(
+  token: string,
+  docId: number,
+  checklistId: string,
+): Promise<ChecklistValidateResult> {
+  const q = encodeURIComponent(checklistId);
+  const response = await fetch(`/api/enterprise/documents/${docId}/checklist?checklistId=${q}`, {
+    method: 'POST',
+    headers: authHeaders(token),
+  });
+  if (!response.ok) {
+    throw new Error(await readResponseError(response, 'Проверка чек-листа не выполнена'));
+  }
+  return response.json() as Promise<ChecklistValidateResult>;
+}
+
+export interface SetupStatus {
+  needsBootstrap: boolean;
+}
+
+export async function fetchSetupStatus(): Promise<SetupStatus> {
+  const response = await fetch('/api/auth/setup-status');
+  if (!response.ok) {
+    throw new Error(await readResponseError(response, 'Не удалось проверить состояние системы'));
+  }
+  return response.json() as Promise<SetupStatus>;
+}
+
+export async function authLogin(email: string, password: string): Promise<AuthResponse> {
+  const response = await fetch('/api/auth/login', {
     method: 'POST',
     headers: jsonContent,
     body: JSON.stringify({ email, password }),
   });
   if (!response.ok) {
-    throw new Error(await readResponseError(response, 'Ошибка авторизации'));
+    throw new Error(await readResponseError(response, 'Ошибка входа'));
   }
   return response.json() as Promise<AuthResponse>;
+}
+
+export async function authBootstrap(email: string, password: string): Promise<AuthResponse> {
+  const response = await fetch('/api/auth/bootstrap', {
+    method: 'POST',
+    headers: jsonContent,
+    body: JSON.stringify({ email, password }),
+  });
+  if (!response.ok) {
+    throw new Error(await readResponseError(response, 'Не удалось создать администратора'));
+  }
+  return response.json() as Promise<AuthResponse>;
+}
+
+export type CreateUserParams = {
+  email: string;
+  password: string;
+  role: string;
+  departmentId?: number | null;
+  displayName?: string | null;
+};
+
+export async function createUserAccount(token: string, params: CreateUserParams): Promise<UserBrief> {
+  const response = await fetch('/api/auth/users', {
+    method: 'POST',
+    headers: { ...jsonContent, ...authHeaders(token) },
+    body: JSON.stringify(params),
+  });
+  if (!response.ok) {
+    throw new Error(await readResponseError(response, 'Не удалось создать пользователя'));
+  }
+  return response.json() as Promise<UserBrief>;
 }
 
 export async function listMyDocuments(token: string): Promise<ParsedDocument[]> {
@@ -92,16 +256,24 @@ export async function saveDocumentText(token: string, docId: number, text: strin
   return response.json() as Promise<ParsedDocument>;
 }
 
-export async function runSpellcheck(text: string): Promise<SpellcheckResponse> {
+export async function runSpellcheck(
+  text: string,
+  token: string,
+  opts?: { documentId?: number },
+): Promise<SpellcheckResponse> {
+  const body: Record<string, unknown> = {
+    text,
+    language: 'ru_RU',
+    maxSuggestions: 5,
+    maxMistakes: 200,
+  };
+  if (opts?.documentId != null) {
+    body.documentId = opts.documentId;
+  }
   const response = await fetch('/api/spellcheck/check', {
     method: 'POST',
-    headers: jsonContent,
-    body: JSON.stringify({
-      text,
-      language: 'ru_RU',
-      maxSuggestions: 5,
-      maxMistakes: 200,
-    }),
+    headers: { ...jsonContent, ...authHeaders(token) },
+    body: JSON.stringify(body),
   });
   if (!response.ok) {
     throw new Error(await readResponseError(response, 'Ошибка проверки орфографии'));

@@ -1,3 +1,4 @@
+using Microsoft.EntityFrameworkCore;
 using DocParseLab.Server.Data;
 using DocParseLab.Server.Models;
 
@@ -9,20 +10,27 @@ public class PdfParserService : IPdfParserService
     private readonly ILogger<PdfParserService> _logger;
     private readonly IGigaChatClient _gigaChatClient;
     private readonly IReadOnlyList<IDocumentTextExtractor> _extractors;
+    private readonly IWebhookService _webhook;
 
     public PdfParserService(
         AppDbContext db,
         ILogger<PdfParserService> logger,
         IGigaChatClient gigaChatClient,
-        IEnumerable<IDocumentTextExtractor> extractors)
+        IEnumerable<IDocumentTextExtractor> extractors,
+        IWebhookService webhook)
     {
         _db = db;
         _logger = logger;
         _gigaChatClient = gigaChatClient;
         _extractors = extractors.ToList();
+        _webhook = webhook;
     }
 
-    public async Task<ParsedDocument> ParseAndSaveAsync(IFormFile file, int? ownerId = null, CancellationToken cancellationToken = default)
+    public async Task<ParsedDocument> ParseAndSaveAsync(
+        IFormFile file,
+        int? ownerId = null,
+        DocumentImportContext? import = null,
+        CancellationToken cancellationToken = default)
     {
         if (file.Length == 0)
         {
@@ -52,30 +60,46 @@ public class PdfParserService : IPdfParserService
             fullText = string.Empty;
         }
 
+        import ??= new DocumentImportContext();
+        var confidential = string.Equals(import.DataClassification, "Confidential", StringComparison.OrdinalIgnoreCase);
+
         string structuredJson;
         string aiSummary;
-        try
+        if (confidential)
         {
-            var gigaResult = await _gigaChatClient.GetStructuredJsonAsync(fullText, cancellationToken);
-            structuredJson = gigaResult.StructuredJson;
-            aiSummary = string.IsNullOrWhiteSpace(gigaResult.HumanReadable)
-                ? BuildFallbackSummary(fullText)
-                : gigaResult.HumanReadable;
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Ошибка при обращении к GigaChat. Используется резервная структура JSON.");
-
-            var fallback = new
+            structuredJson = System.Text.Json.JsonSerializer.Serialize(new
             {
                 fileName = file.FileName,
-                textPreview = fullText.Length > 2000 ? fullText[..2000] : fullText,
-                error = "GigaChat call failed, fallback structure is used."
-            };
+                dataClassification = import.DataClassification,
+                note = "Внешние LLM отключены политикой конфиденциальности."
+            }, new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
+            aiSummary = "Документ с грифом конфиденциальности: AI-описание и внешние сервисы не использовались.";
+        }
+        else
+        {
+            try
+            {
+                var gigaResult = await _gigaChatClient.GetStructuredJsonAsync(fullText, cancellationToken);
+                structuredJson = gigaResult.StructuredJson;
+                aiSummary = string.IsNullOrWhiteSpace(gigaResult.HumanReadable)
+                    ? BuildFallbackSummary(fullText)
+                    : gigaResult.HumanReadable;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Ошибка при обращении к GigaChat. Используется резервная структура JSON.");
 
-            structuredJson = System.Text.Json.JsonSerializer.Serialize(fallback,
-                new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
-            aiSummary = "GigaChat недоступен, показана резервная структура по страницам без AI-описания.";
+                var fallback = new
+                {
+                    fileName = file.FileName,
+                    textPreview = fullText.Length > 2000 ? fullText[..2000] : fullText,
+                    error = "GigaChat call failed, fallback structure is used."
+                };
+
+                structuredJson = System.Text.Json.JsonSerializer.Serialize(fallback,
+                    new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
+                aiSummary = "GigaChat недоступен, показана резервная структура по страницам без AI-описания.";
+            }
         }
 
         var entity = new ParsedDocument
@@ -86,11 +110,45 @@ public class PdfParserService : IPdfParserService
             FullText = fullText,
             StructuredJson = structuredJson,
             AiSummary = aiSummary,
-            UploadedAt = DateTime.UtcNow
+            UploadedAt = DateTime.UtcNow,
+            ProcessingProfile = string.IsNullOrWhiteSpace(import.ProcessingProfile) ? "general" : import.ProcessingProfile.Trim(),
+            DataClassification = string.IsNullOrWhiteSpace(import.DataClassification) ? "Internal" : import.DataClassification.Trim()
         };
+
+        if (ownerId.HasValue)
+        {
+            var owner = await _db.Users.AsNoTracking().FirstOrDefaultAsync(u => u.Id == ownerId.Value, cancellationToken);
+            if (owner != null)
+            {
+                entity.DepartmentId = owner.DepartmentId;
+                entity.ResponsibleUserId = ownerId;
+            }
+        }
 
         _db.ParsedDocuments.Add(entity);
         await _db.SaveChangesAsync(cancellationToken);
+
+        if (ownerId.HasValue && !string.IsNullOrWhiteSpace(entity.FullText))
+        {
+            _db.DocumentVersions.Add(new Models.DocumentVersion
+            {
+                DocumentId = entity.Id,
+                VersionNumber = 1,
+                Text = entity.FullText,
+                ChangeType = "import",
+                CreatedByUserId = ownerId,
+                CreatedAt = DateTime.UtcNow
+            });
+            await _db.SaveChangesAsync(cancellationToken);
+        }
+
+        await _webhook.NotifyAsync("document.parsed", new
+        {
+            documentId = entity.Id,
+            fileName = entity.FileName,
+            profile = entity.ProcessingProfile,
+            classification = entity.DataClassification
+        }, cancellationToken);
 
         return entity;
     }

@@ -1,19 +1,43 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import './App.css';
-import type { ParsedDocument, SpellcheckMistake, SpellcheckResponse } from './types/api';
+import type {
+  ChecklistValidateResult,
+  ExtractedEntities,
+  ParsedDocument,
+  SpellcheckMistake,
+  SpellcheckResponse,
+} from './types/api';
 import { normalizeNewlines } from './lib/text';
 import {
-  authLoginOrRegister,
   deleteDocument as deleteDocumentRequest,
   exportDocument,
+  fetchDocumentEntities,
   getDocument,
-  listMyDocuments,
+  parseBatch,
   parseDocument,
   runSpellcheck,
   saveDocumentText,
   sendDocumentByEmail,
+  validateDocumentChecklist,
 } from './api/backend';
 import { prepareDocLikeSource, renderDocLikeText, renderHighlightedText } from './components/DocumentTextViews';
+import { AdminAuditView } from './components/AdminAuditView';
+import { AdminUsersView } from './components/AdminUsersView';
+import { AiRewriteModal } from './components/AiRewriteModal';
+import { DocumentSharePanel } from './components/DocumentSharePanel';
+import { DocumentMetadataPanel } from './components/DocumentMetadataPanel';
+import { DocumentRegistryView } from './components/DocumentRegistryView';
+import { DocumentVersionsPanel } from './components/DocumentVersionsPanel';
+import { DocumentWorkspace } from './components/DocumentWorkspace';
+import { MyTasksView } from './components/MyTasksView';
+import { OfficeWorkflowPanel } from './components/OfficeWorkflowPanel';
+import { DocumentSignaturePanel } from './components/DocumentSignaturePanel';
+import { LoginScreen } from './components/LoginScreen';
+import { ProfileSettingsModal } from './components/ProfileSettingsModal';
+import type { AuthResponse } from './types/api';
+import { IconEdit, IconFolder, IconLogo, IconStack, IconTasks, IconUpload } from './components/AppIcons';
+import { fetchCurrentUser, fetchMyTasks } from './api/office';
+import type { CurrentUser, MainView } from './types/office';
+import { ROLE_LABELS } from './types/office';
 import { findTextMatches } from './lib/search';
 
 function sameSpellcheckMistake(a: SpellcheckMistake, b: SpellcheckMistake): boolean {
@@ -47,13 +71,6 @@ function App() {
   const [result, setResult] = useState<ParsedDocument | null>(null);
   const [authToken, setAuthToken] = useState<string | null>(() => localStorage.getItem('authToken'));
   const [authEmail, setAuthEmail] = useState<string | null>(() => localStorage.getItem('authEmail'));
-  const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
-  const [authEmailInput, setAuthEmailInput] = useState('');
-  const [authPasswordInput, setAuthPasswordInput] = useState('');
-  const [isAuthLoading, setIsAuthLoading] = useState(false);
-  const [myDocs, setMyDocs] = useState<ParsedDocument[]>([]);
-  const [isLoadingDocs, setIsLoadingDocs] = useState(false);
-  const [openingDocId, setOpeningDocId] = useState<number | null>(null);
   const [deletingDocId, setDeletingDocId] = useState<number | null>(null);
   const [isSendModalOpen, setIsSendModalOpen] = useState(false);
   const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
@@ -75,15 +92,54 @@ function App() {
   const [textSearchQuery, setTextSearchQuery] = useState('');
   const [textSearchActiveIndex, setTextSearchActiveIndex] = useState(0);
   const textSearchInputRef = useRef<HTMLInputElement | null>(null);
+  const [processingProfile, setProcessingProfile] = useState('general');
+  const [dataClassification, setDataClassification] = useState('Internal');
+  const [batchFiles, setBatchFiles] = useState<File[]>([]);
+  const [isBatchUploading, setIsBatchUploading] = useState(false);
+  const [batchSummary, setBatchSummary] = useState<string | null>(null);
+  const [entitiesData, setEntitiesData] = useState<ExtractedEntities | null>(null);
+  const [entitiesLoading, setEntitiesLoading] = useState(false);
+  const [checklistId, setChecklistId] = useState('contract_basic');
+  const [checklistResult, setChecklistResult] = useState<ChecklistValidateResult | null>(null);
+  const [checklistLoading, setChecklistLoading] = useState(false);
+  const [mainView, setMainView] = useState<MainView>('registry');
+  const [pendingTasksCount, setPendingTasksCount] = useState(0);
+  const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
+  const [profileOpen, setProfileOpen] = useState(false);
+  const [rewriteOpen, setRewriteOpen] = useState(false);
+
+  const isAdmin = currentUser?.role === 'Admin';
+  const documentTextLocked = Boolean(
+    authToken && result?.canEdit === false && result.ownerId != null,
+  );
 
   useEffect(() => {
-    if (authToken) {
-      void loadMyDocuments();
-    } else {
-      setMyDocs([]);
+    if (!authToken) {
+      setCurrentUser(null);
+      return;
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    let cancelled = false;
+    void fetchCurrentUser(authToken)
+      .then((u) => {
+        if (!cancelled) setCurrentUser(u);
+      })
+      .catch(() => {
+        if (!cancelled) setCurrentUser(null);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [authToken]);
+
+  useEffect(() => {
+    if (!authToken) {
+      setPendingTasksCount(0);
+      return;
+    }
+    void fetchMyTasks(authToken)
+      .then((t) => setPendingTasksCount(t.length))
+      .catch(() => setPendingTasksCount(0));
+  }, [authToken, result?.workflowStatus]);
 
   useEffect(() => {
     if (!result) {
@@ -100,6 +156,8 @@ function App() {
     setActiveMistakeIndex(-1);
     setTextSearchQuery('');
     setTextSearchActiveIndex(0);
+    setEntitiesData(null);
+    setChecklistResult(null);
   }, [result?.id]);
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -110,6 +168,7 @@ function App() {
   };
 
   const handleUpload = async () => {
+    if (!authToken) return;
     if (!file) {
       setError('Выберите PDF или DOCX файл.');
       return;
@@ -117,8 +176,12 @@ function App() {
 
     setIsUploading(true);
     setError(null);
+    setBatchSummary(null);
     try {
-      const data = await parseDocument(file, authToken);
+      const data = await parseDocument(file, authToken, {
+        processingProfile,
+        dataClassification,
+      });
       setResult(data);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Неизвестная ошибка');
@@ -127,47 +190,100 @@ function App() {
     }
   };
 
-  const handleAuthSubmit = async () => {
-    setError(null);
-    if (!authEmailInput || !authPasswordInput) {
-      setError('Укажите email и пароль.');
+  const handleBatchUpload = async () => {
+    if (!authToken) return;
+    if (batchFiles.length === 0) {
+      setError('Выберите один или несколько PDF/DOCX для пакетной загрузки.');
+      return;
+    }
+    if (batchFiles.length > 30) {
+      setError('Не более 30 файлов за один запрос.');
       return;
     }
 
-    setIsAuthLoading(true);
+    setIsBatchUploading(true);
+    setError(null);
+    setBatchSummary(null);
     try {
-      const data = await authLoginOrRegister(authMode, authEmailInput, authPasswordInput);
-      setAuthToken(data.token);
-      setAuthEmail(data.email);
-      localStorage.setItem('authToken', data.token);
-      localStorage.setItem('authEmail', data.email);
-      setAuthPasswordInput('');
+      const r = await parseBatch(batchFiles.slice(0, 30), authToken, {
+        processingProfile,
+        dataClassification,
+      });
+      if (r.documents.length > 0) {
+        setResult(r.documents[0]);
+      } else {
+        setResult(null);
+      }
+      setBatchSummary(
+        `Пакет: обработано ${r.documents.length}, с ошибками ${r.errors.length}.`,
+      );
+      setBatchFiles([]);
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Неизвестная ошибка при авторизации');
+      setError(e instanceof Error ? e.message : 'Ошибка пакетной загрузки');
     } finally {
-      setIsAuthLoading(false);
+      setIsBatchUploading(false);
     }
+  };
+
+  const applyAuth = (data: AuthResponse) => {
+    setAuthToken(data.token);
+    setAuthEmail(data.email);
+    localStorage.setItem('authToken', data.token);
+    localStorage.setItem('authEmail', data.email);
+    setCurrentUser({
+      id: data.userId,
+      email: data.email,
+      role: data.role,
+      departmentId: data.departmentId,
+      departmentName: data.departmentName,
+      displayName: data.displayName,
+    });
+    setMainView('registry');
+    setError(null);
+    setResult(null);
   };
 
   const handleLogout = () => {
     setAuthToken(null);
     setAuthEmail(null);
+    setCurrentUser(null);
+    setProfileOpen(false);
+    setResult(null);
+    setMainView('registry');
     localStorage.removeItem('authToken');
     localStorage.removeItem('authEmail');
-    setMyDocs([]);
+    setEntitiesData(null);
+    setChecklistResult(null);
+    setSpellcheck(null);
+    setFile(null);
+    setBatchFiles([]);
   };
 
-  const loadMyDocuments = async () => {
-    if (!authToken) return;
-
-    setIsLoadingDocs(true);
+  const handleFetchEntities = async () => {
+    if (!authToken || !result) return;
+    setEntitiesLoading(true);
+    setEntitiesData(null);
+    setError(null);
     try {
-      const data = await listMyDocuments(authToken);
-      setMyDocs(data);
+      setEntitiesData(await fetchDocumentEntities(authToken, result.id));
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Не удалось загрузить список документов');
+      setError(e instanceof Error ? e.message : 'Не удалось извлечь сущности');
     } finally {
-      setIsLoadingDocs(false);
+      setEntitiesLoading(false);
+    }
+  };
+
+  const handleValidateChecklist = async () => {
+    if (!authToken || !result || !checklistId.trim()) return;
+    setChecklistLoading(true);
+    setChecklistResult(null);
+    setError(null);
+    try {
+      setChecklistResult(await validateDocumentChecklist(authToken, result.id, checklistId.trim()));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Проверка чек-листа не выполнена');
+    } finally {
+      setChecklistLoading(false);
     }
   };
 
@@ -229,14 +345,12 @@ function App() {
     }
 
     setError(null);
-    setOpeningDocId(docId);
     try {
       const data = await getDocument(authToken, docId);
       setResult(data);
+      setMainView('workspace');
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Не удалось открыть документ');
-    } finally {
-      setOpeningDocId(null);
     }
   };
 
@@ -288,19 +402,46 @@ function App() {
     }
   };
 
+  const handleApplyVersionText = (text: string) => {
+    const normalized = normalizeNewlines(text);
+    setIsEditing(true);
+    setEditText(normalized);
+    setSpellcheck(null);
+    setSpellcheckSourceText('');
+    setActiveMistakeIndex(-1);
+  };
+
+  const handleRestoreVersion = async (text: string) => {
+    if (!result || !authToken) {
+      throw new Error('Войдите в аккаунт, чтобы сохранить версию в документ.');
+    }
+    if (documentTextLocked) {
+      throw new Error('Редактирование недоступно для текущего статуса документа.');
+    }
+    const normalized = normalizeNewlines(text);
+    const data = await saveDocumentText(authToken, result.id, normalized);
+    setResult(data);
+    setIsEditing(false);
+    setEditText(normalizeNewlines(data.fullText ?? ''));
+    setSpellcheck(null);
+    setSpellcheckSourceText('');
+    setActiveMistakeIndex(-1);
+  };
+
+  const refreshDocument = async () => {
+    if (!authToken || !result?.id) return;
+    try {
+      setResult(await getDocument(authToken, result.id));
+    } catch {
+      // ignore background refresh errors
+    }
+  };
+
   const handleSaveText = async () => {
-    if (!result) return;
+    if (!result || !authToken) return;
     setError(null);
     setIsSavingText(true);
     try {
-      if (!authToken) {
-        // Гостевой режим: редактирование только локально (без сохранения в БД).
-        setResult({ ...result, fullText: editText });
-        setSpellcheckSourceText('');
-        setIsEditing(false);
-        return;
-      }
-
       const data = await saveDocumentText(authToken, result.id, editText);
       setResult(data);
       setSpellcheckSourceText('');
@@ -313,11 +454,13 @@ function App() {
   };
 
   const spellcheckText = async (textToCheck: string) => {
+    if (!authToken) return;
     const normalizedText = normalizeNewlines(textToCheck ?? '');
     setError(null);
     setIsSpellchecking(true);
     try {
-      const data = await runSpellcheck(normalizedText);
+      const docCtx = result?.id != null ? { documentId: result.id } : undefined;
+      const data = await runSpellcheck(normalizedText, authToken, docCtx);
       setSpellcheck(data);
       setSpellcheckSourceText(normalizedText);
       setActiveMistakeIndex(data.mistakes.length > 0 ? 0 : -1);
@@ -352,7 +495,6 @@ function App() {
     setError(null);
     try {
       await deleteDocumentRequest(authToken, docId);
-      setMyDocs((prev) => prev.filter((d) => d.id !== docId));
       if (result?.id === docId) {
         setResult(null);
         setSpellcheck(null);
@@ -540,142 +682,260 @@ function App() {
     }
   };
 
+  if (!authToken) {
+    return <LoginScreen onAuthenticated={applyAuth} />;
+  }
+
   return (
-    <div className="app-root">
+    <div className={`app-root${result ? ' app-root--document' : ''}`}>
       <header className="app-header">
-        <div>
-          <h1>DocParseLab</h1>
-          <p>Загрузите PDF или DOCX — извлечение текста, проверка и экспорт.</p>
+        <div className="app-brand">
+          <IconLogo className="app-logo" />
+          <div className="app-brand-text">
+            <h1>DocParseLab</h1>
+            <p>ИС документов офиса: реестр, согласование, разбор PDF/DOCX и правка текста.</p>
+            <div className="feature-pills">
+              <span className="feature-pill">Реестр</span>
+              <span className="feature-pill">Согласование</span>
+              <span className="feature-pill">Орфография AI</span>
+            </div>
+          </div>
         </div>
         <div className="auth-panel">
-          {authToken && authEmail ? (
             <div className="auth-info">
-              <span>Вы вошли как {authEmail}</span>
-              <button onClick={handleLogout}>Выйти</button>
-            </div>
-          ) : (
-            <div className="auth-form">
-              <div className="auth-toggle">
-                <button
-                  className={authMode === 'login' ? 'active' : ''}
-                  onClick={() => setAuthMode('login')}
-                >
-                  Вход
+              <span className="auth-user-line">
+                {currentUser?.displayName || authEmail}
+                {currentUser?.role && (
+                  <span className="auth-role-badge">{ROLE_LABELS[currentUser.role] ?? currentUser.role}</span>
+                )}
+              </span>
+              {currentUser?.departmentName && (
+                <span className="auth-dept-line">{currentUser.departmentName}</span>
+              )}
+              <div className="auth-info-actions">
+                <button type="button" className="btn-ghost" onClick={() => setProfileOpen(true)}>
+                  Профиль
                 </button>
-                <button
-                  className={authMode === 'register' ? 'active' : ''}
-                  onClick={() => setAuthMode('register')}
-                >
-                  Регистрация
+                <button type="button" className="btn-ghost" onClick={handleLogout}>
+                  Выйти
                 </button>
               </div>
-              <input
-                type="email"
-                placeholder="Email"
-                value={authEmailInput}
-                onChange={(e) => setAuthEmailInput(e.target.value)}
-              />
-              <input
-                type="password"
-                placeholder="Пароль"
-                value={authPasswordInput}
-                onChange={(e) => setAuthPasswordInput(e.target.value)}
-              />
-              <button onClick={handleAuthSubmit} disabled={isAuthLoading}>
-                {isAuthLoading ? 'Обработка...' : authMode === 'login' ? 'Войти' : 'Зарегистрироваться'}
-              </button>
-              <small>Можно пользоваться приложением и без входа как гость.</small>
             </div>
-          )}
         </div>
       </header>
 
-      <div className="upload-panel">
-        <label className="file-input">
-          <span className="file-input-label">{file ? file.name : 'Выберите PDF/DOCX-файл'}</span>
-          <span className="file-input-button">Обзор</span>
-          <input type="file" accept="application/pdf,.docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" onChange={handleFileChange} />
-        </label>
-        <button onClick={handleUpload} disabled={isUploading || !file}>
-          {isUploading ? 'Обработка...' : 'Загрузить и распарсить'}
-        </button>
-      </div>
+      <nav className="main-nav" aria-label="Разделы">
+          <button type="button" className={mainView === 'registry' ? 'active' : ''} onClick={() => setMainView('registry')}>
+            <IconFolder /> Реестр
+          </button>
+          <button type="button" className={mainView === 'tasks' ? 'active' : ''} onClick={() => setMainView('tasks')}>
+            <IconTasks /> Мои задачи
+            {pendingTasksCount > 0 && <span className="nav-badge">{pendingTasksCount}</span>}
+          </button>
+          <button type="button" className={mainView === 'workspace' ? 'active' : ''} onClick={() => setMainView('workspace')}>
+            <IconEdit /> Работа с документом
+          </button>
+          {isAdmin && (
+            <button type="button" className={mainView === 'admin' ? 'active' : ''} onClick={() => setMainView('admin')}>
+              Администрирование
+            </button>
+          )}
+        </nav>
+      {mainView === 'admin' && isAdmin && (
+        <>
+          <AdminUsersView token={authToken} />
+          <AdminAuditView token={authToken} />
+        </>
+      )}
+      {mainView === 'registry' && (
+        <DocumentRegistryView token={authToken} onOpenDocument={(id) => void openDocumentById(id)} onSwitchView={setMainView} />
+      )}
+      {mainView === 'tasks' && (
+        <MyTasksView token={authToken} onOpenDocument={(id) => void openDocumentById(id)} />
+      )}
+      {mainView === 'workspace' && (
+      <>
+      <section className="upload-panel">
+        <div className="upload-hero">
+          <div className="upload-hero-copy">
+            <div className="upload-hero-icon" aria-hidden>
+              <IconUpload />
+            </div>
+            <h2>Новый документ</h2>
+            <p>Загрузите PDF или DOCX — текст извлечётся автоматически, дальше правка и согласование в одном месте.</p>
+          </div>
+          <div className="upload-hero-actions">
+            <label className={`upload-dropzone${file ? ' has-file' : ''}`}>
+              <input
+                type="file"
+                accept="application/pdf,.docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                onChange={handleFileChange}
+              />
+              <span className="upload-dropzone-title">
+                {file ? file.name : 'Нажмите или перетащите файл'}
+              </span>
+              <span className="upload-dropzone-hint">PDF, DOCX</span>
+            </label>
+            <button
+              type="button"
+              className="btn-primary btn-lg"
+              onClick={() => void handleUpload()}
+              disabled={isUploading || !file}
+            >
+              {isUploading ? 'Обработка…' : 'Загрузить и распарсить'}
+            </button>
+          </div>
+        </div>
+        <div className="upload-options-grid">
+          <label className="parse-field">
+            <span className="parse-field-label">Профиль обработки</span>
+            <select value={processingProfile} onChange={(e) => setProcessingProfile(e.target.value)}>
+              <option value="general">Общий</option>
+              <option value="contract">Договор</option>
+              <option value="instruction">Инструкция</option>
+            </select>
+          </label>
+          <label className="parse-field">
+            <span className="parse-field-label">Классификация</span>
+            <select value={dataClassification} onChange={(e) => setDataClassification(e.target.value)}>
+              <option value="Internal">Internal</option>
+              <option value="Public">Public</option>
+              <option value="Confidential">Confidential (без GigaChat)</option>
+            </select>
+          </label>
+        </div>
+        <div className="upload-batch">
+          <div className="upload-batch-head">
+            <IconStack />
+            <div>
+              <strong>Пакетная загрузка</strong>
+              <span>До 30 файлов за один раз</span>
+            </div>
+          </div>
+          <div className="upload-batch-actions">
+            <label className="batch-file-btn">
+              <input
+                type="file"
+                multiple
+                accept="application/pdf,.docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                onChange={(e) => setBatchFiles(Array.from(e.target.files ?? []))}
+              />
+              {batchFiles.length ? `Выбрано: ${batchFiles.length}` : 'Выбрать файлы'}
+            </label>
+            <button
+              type="button"
+              className="btn-secondary"
+              onClick={() => void handleBatchUpload()}
+              disabled={isBatchUploading || batchFiles.length === 0}
+            >
+              {isBatchUploading ? 'Загрузка…' : 'Загрузить пакет'}
+            </button>
+          </div>
+        </div>
+      </section>
+
+      {batchSummary && <div className="batch-summary">{batchSummary}</div>}
 
       {error && <div className="error">{error}</div>}
 
-      {authToken && (
-        <section className="my-docs">
-          <h2>Мои загруженные файлы</h2>
-          <button onClick={loadMyDocuments} disabled={isLoadingDocs}>
-            {isLoadingDocs ? 'Загрузка...' : 'Обновить список'}
-          </button>
-          {myDocs.length === 0 && !isLoadingDocs && <p>У вас пока нет сохранённых документов.</p>}
-          {myDocs.length > 0 && (
-            <ul className="docs-list">
-              {myDocs.map((doc) => (
-                <li key={doc.id} className="docs-list-item">
-                  <div>
-                    <strong>{doc.fileName}</strong>
-                    <div className="docs-meta">
-                      Загружен: {new Date(doc.uploadedAt).toLocaleString()}
-                    </div>
-                  </div>
-                  <div className="docs-actions">
-                    <button
-                      onClick={() => {
-                        void openDocumentById(doc.id);
-                      }}
-                      disabled={openingDocId === doc.id}
-                    >
-                      {openingDocId === doc.id ? 'Открытие...' : 'Открыть'}
-                    </button>
-                    <button
-                      onClick={() => {
-                        openSendModal(doc.id, doc.fileName);
-                      }}
-                    >
-                      Отправить на email
-                    </button>
-                    <button
-                      onClick={() => {
-                        openDeleteModal(doc.id, doc.fileName);
-                      }}
-                      disabled={deletingDocId === doc.id}
-                    >
-                      {deletingDocId === doc.id ? 'Удаление...' : 'Удалить'}
-                    </button>
-                  </div>
-                </li>
-              ))}
-            </ul>
-          )}
-        </section>
-      )}
-
       {result && (
-        <div className="result">
-          <h2>Результат</h2>
-          <p>
-            <strong>Файл:</strong> {result.fileName}
-          </p>
-          {result.originalFileType && (
-            <p>
-              <strong>Тип:</strong> {result.originalFileType.toUpperCase()}
-            </p>
+        <DocumentWorkspace
+          document={result}
+          authToken={authToken}
+          documentTextLocked={documentTextLocked}
+          onBack={() => setMainView('registry')}
+          onDownloadJson={handleDownloadJson}
+          onExport={(fmt) => void handleExport(fmt)}
+          onSendEmail={() => openSendModal(result.id, result.fileName)}
+          onDelete={() => openDeleteModal(result.id, result.fileName)}
+          sidebar={
+            <>
+              {authToken && result.workflowStatus && (
+                <>
+                  <OfficeWorkflowPanel
+                    token={authToken}
+                    document={result}
+                    onUpdated={setResult}
+                    onError={(msg) => setError(msg)}
+                  />
+                  <DocumentSignaturePanel
+                    token={authToken}
+                    document={result}
+                    onUpdated={setResult}
+                    onError={(msg) => setError(msg)}
+                  />
+                  <DocumentMetadataPanel
+                    token={authToken}
+                    document={result}
+                    onUpdated={setResult}
+                    onError={(msg) => setError(msg)}
+                  />
+                  {currentUser && (
+                    <DocumentSharePanel
+                      token={authToken}
+                      document={result}
+                      currentUserId={currentUser.id}
+                      onShared={() => void refreshDocument()}
+                      onError={(msg) => setError(msg)}
+                    />
+                  )}
+                  <DocumentVersionsPanel
+                    key={`${result.id}-${result.editedAt ?? result.uploadedAt}`}
+                    token={authToken}
+                    documentId={result.id}
+                    onApplyVersion={handleApplyVersionText}
+                    onRestoreVersion={handleRestoreVersion}
+                    applyDisabled={documentTextLocked}
+                  />
+                </>
+              )}
+              {authToken && (
+                <div className="doc-sidebar-block">
+                  <h3 className="doc-sidebar-block__title">Проверки и извлечение</h3>
+              <button type="button" onClick={() => void handleFetchEntities()} disabled={entitiesLoading}>
+                {entitiesLoading ? 'Извлечение…' : 'Извлечь даты, суммы, ИНН'}
+              </button>
+              <div className="checklist-inline">
+                <input
+                  type="text"
+                  value={checklistId}
+                  onChange={(e) => setChecklistId(e.target.value)}
+                  placeholder="ID чек-листа"
+                  aria-label="Идентификатор чек-листа"
+                />
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  onClick={() => void handleValidateChecklist()}
+                  disabled={checklistLoading}
+                >
+                  {checklistLoading ? '…' : 'Чек-лист'}
+                </button>
+              </div>
+              {checklistResult && (
+                <p className={checklistResult.ok ? 'checklist-ok' : 'checklist-bad'}>
+                  {checklistResult.ok
+                    ? `Чек-лист «${checklistResult.checklistId}»: всё найдено.`
+                    : `Чек-лист «${checklistResult.checklistId}»: не хватает — ${checklistResult.missing.join('; ')}`}
+                </p>
+              )}
+              {entitiesData && (
+                <pre className="entities-pre">{JSON.stringify(entitiesData, null, 2)}</pre>
+              )}
+            </div>
           )}
-          <p>
-            <strong>Загружен:</strong> {new Date(result.uploadedAt).toLocaleString()}
-          </p>
-
-          <div className="result-actions">
-            <button onClick={handleDownloadJson}>Скачать JSON</button>
-            <button onClick={() => void handleExport('docx')}>Экспорт DOCX</button>
-            <button onClick={() => void handleExport('pdf')}>Экспорт PDF</button>
-          </div>
-
-          <div className="single-block">
-            <div className="column">
-              <h3>Текст</h3>
+            </>
+          }
+          editor={
+            <div className="doc-text-panel">
+              <div className="doc-text-panel__head">
+                <h3>Текст документа</h3>
+                {result.editedAt && (
+                  <span className="doc-text-panel__saved">
+                    Сохранено: {new Date(result.editedAt).toLocaleString()}
+                  </span>
+                )}
+              </div>
               <div className="editor-toolbar">
                 <div className="text-search-row">
                   <label className="text-search-label" htmlFor="text-search-input">
@@ -716,6 +976,8 @@ function App() {
                   <div className="editor-toolbar-left">
                   {!isEditing ? (
                     <button
+                      disabled={documentTextLocked}
+                      title={documentTextLocked ? 'Редактирование недоступно для текущего статуса' : undefined}
                       onClick={() => {
                         setIsEditing(true);
                         setEditText(normalizeNewlines(result.fullText ?? ''));
@@ -729,7 +991,7 @@ function App() {
                   ) : (
                     <>
                       <button onClick={handleSaveText} disabled={isSavingText}>
-                        {isSavingText ? 'Сохранение...' : authToken ? 'Сохранить' : 'Применить (локально)'}
+                        {isSavingText ? 'Сохранение...' : 'Сохранить'}
                       </button>
                       <button
                         onClick={() => {
@@ -751,6 +1013,22 @@ function App() {
                   </button>
 
                   <button onClick={() => void copyCurrentText()}>{isEditing ? 'Копировать из редактора' : 'Копировать текст'}</button>
+
+                  <button
+                    type="button"
+                    disabled={
+                      result.dataClassification === 'Confidential' ||
+                      (isEditing ? !editText.trim() : !(result.fullText ?? '').trim())
+                    }
+                    title={
+                      result.dataClassification === 'Confidential'
+                        ? 'Для Confidential переписывание через GigaChat недоступно'
+                        : undefined
+                    }
+                    onClick={() => setRewriteOpen(true)}
+                  >
+                    AI-переписать
+                  </button>
 
                   {isEditing && spellcheck && spellcheck.mistakes.length > 0 && (
                     <button onClick={() => void applyAllSuggestions()} disabled={isSpellchecking}>
@@ -782,10 +1060,6 @@ function App() {
                     </div>
                   )}
                 </div>
-
-                <div className="editor-toolbar-right">
-                  {result.editedAt && <span>Сохранено: {new Date(result.editedAt).toLocaleString()}</span>}
-                </div>
                 </div>
               </div>
 
@@ -814,6 +1088,11 @@ function App() {
                         <div className="mistakes-title">Ошибки</div>
                         <div className="mistakes-badge">{spellcheck.mistakes.length}</div>
                       </div>
+                      {spellcheck.spellcheckEngine === 'hunspell' && (
+                        <p className="spell-engine-hint mistakes-engine-hint">
+                          Локальная проверка (Confidential).
+                        </p>
+                      )}
                       <div className="mistakes-list">
                         {spellcheck.mistakes.length > normalizedMistakes.length && (
                           <div className="mistakes-footer" style={{ marginBottom: 10 }}>
@@ -892,22 +1171,30 @@ function App() {
                       {spellcheck.mistakes.length === 0 ? 'Ошибок не найдено.' : `Найдено ошибок: ${spellcheck.mistakes.length}`}
                       {spellcheck.mistakes.length > 0 && <span className="spell-summary-hint"> (включите “Редактировать”, чтобы исправлять кликом)</span>}
                     </div>
+                    {spellcheck.spellcheckEngine === 'hunspell' && (
+                      <p className="spell-engine-hint">
+                        Локальная проверка (Hunspell), без GigaChat — классификация документа Confidential.
+                      </p>
+                    )}
                   </div>
                 )
               )}
             </div>
-          </div>
+          }
+          aiSummary={
+            <details className="doc-ai-details" open>
+              <summary>AI-описание документа</summary>
+              <div className="doc-ai-details__body">
+                {result.aiSummary && result.aiSummary.trim().length > 0
+                  ? result.aiSummary
+                  : '(описание от GigaChat отсутствует)'}
+              </div>
+            </details>
+          }
+        />
+      )}
 
-          <div className="single-block">
-            <div className="column">
-              <h3>AI‑описание документа</h3>
-              <pre className="text-output">
-                {result.aiSummary && result.aiSummary.trim().length > 0 ? result.aiSummary : '(описание от GigaChat отсутствует)'}
-              </pre>
-            </div>
-          </div>
-
-        </div>
+      </>
       )}
 
       {isSendModalOpen && (
@@ -958,6 +1245,27 @@ function App() {
             </div>
           </div>
         </div>
+      )}
+
+      {result && rewriteOpen && (
+        <AiRewriteModal
+          open={rewriteOpen}
+          sourceText={isEditing ? editText : normalizeNewlines(result.fullText ?? '')}
+          documentId={authToken && result.ownerId != null ? result.id : undefined}
+          token={authToken}
+          confidential={result.dataClassification === 'Confidential'}
+          onClose={() => setRewriteOpen(false)}
+          onApply={handleApplyVersionText}
+        />
+      )}
+
+      {profileOpen && authToken && currentUser && (
+        <ProfileSettingsModal
+          token={authToken}
+          user={currentUser}
+          onClose={() => setProfileOpen(false)}
+          onSaved={setCurrentUser}
+        />
       )}
 
       {isDeleteModalOpen && (

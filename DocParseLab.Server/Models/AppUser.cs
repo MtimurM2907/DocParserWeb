@@ -6,6 +6,13 @@ public class AppUser
 
     public string Email { get; set; } = string.Empty;
 
+    public string? DisplayName { get; set; }
+
+    public string Role { get; set; } = UserRoles.Employee;
+
+    public int? DepartmentId { get; set; }
+    public Department? Department { get; set; }
+
     public string PasswordHash { get; set; } = string.Empty;
 
     public string PasswordSalt { get; set; } = string.Empty;
@@ -18,4 +25,3 @@ public class AppUser
 
     public ICollection<DocumentShare> ReceivedShares { get; set; } = new List<DocumentShare>();
 }
-

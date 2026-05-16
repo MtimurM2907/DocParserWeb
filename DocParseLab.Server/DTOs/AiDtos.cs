@@ -6,6 +6,9 @@ public sealed class RewriteRequest
     public string Mode { get; set; } = "Более формально";
     public string? Tone { get; set; }
     public string? Length { get; set; }
+
+    /// <summary>При указании и авторизации: для Confidential переписывание через GigaChat запрещено.</summary>
+    public int? DocumentId { get; set; }
 }
 
 public sealed class RewriteResponse

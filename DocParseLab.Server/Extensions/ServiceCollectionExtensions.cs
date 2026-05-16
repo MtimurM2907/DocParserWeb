@@ -20,10 +20,23 @@ public static class ServiceCollectionExtensions
     /// </summary>
     public static IServiceCollection AddApplicationServices(this IServiceCollection services, IConfiguration configuration)
     {
+        services.AddHttpContextAccessor();
+        services.AddHttpClient();
+        services.Configure<EnterpriseOptions>(configuration.GetSection(EnterpriseOptions.SectionName));
+        services.AddScoped<IAuditService, AuditService>();
+        services.AddScoped<IWebhookService, WebhookService>();
+        services.AddScoped<IChecklistService, ChecklistService>();
+        services.AddScoped<IEntityExtractionService, EntityExtractionService>();
+        services.AddScoped<IDocumentAccessService, DocumentAccessService>();
+        services.AddScoped<IDocumentVersionService, DocumentVersionService>();
+        services.AddScoped<IDocumentWorkflowService, DocumentWorkflowService>();
+        services.AddScoped<IDocumentSignatureService, DocumentSignatureService>();
+
         services.AddScoped<IPdfParserService, PdfParserService>();
         services.AddScoped<IDocumentTextExtractor, PdfTextExtractor>();
         services.AddScoped<IDocumentTextExtractor, DocxTextExtractor>();
         services.AddScoped<IDocumentExportService, DocumentExportService>();
+        services.AddSingleton<HunspellSpellcheckService>();
         services.AddScoped<ISpellcheckService, AiSpellcheckService>();
         services.AddScoped<IEmailSender, SmtpEmailSender>();
         services.AddSingleton<IOcrService, TesseractOcrService>();
