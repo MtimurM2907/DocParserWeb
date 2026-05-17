@@ -143,12 +143,16 @@ export function renderHighlightedText(
     const empty = !(text ?? '').trim();
     if (searchOn) {
       return (
-        <pre className="text-output spell-preview" aria-label="Текст с подсветкой поиска">
+        <pre className="text-output spell-preview" spellCheck={false} lang="ru" aria-label="Текст с подсветкой поиска">
           {renderSegmentsWithSearch(text ?? '', 0, searchMatches!, activeIdx, 'h0')}
         </pre>
       );
     }
-    return <pre className="text-output">{empty ? '(текст не распознан)' : text}</pre>;
+    return (
+      <pre className="text-output" spellCheck={false} lang="ru">
+        {empty ? '(текст не распознан)' : text}
+      </pre>
+    );
   }
 
   const safeText = text ?? '';
@@ -202,7 +206,7 @@ export function renderHighlightedText(
   }
 
   return (
-    <pre className="text-output spell-preview" aria-label="Текст с подсветкой орфографических ошибок">
+    <pre className="text-output spell-preview" spellCheck={false} lang="ru" aria-label="Текст с подсветкой орфографических ошибок">
       {parts}
     </pre>
   );
@@ -221,9 +225,13 @@ export function renderDocLikeText(
   const sm = searchOn ? searchMatches! : [];
 
   return (
-    <div className="doc-like-view text-output" aria-label="Текст в оригинальном стиле">
+    <div className="doc-like-view text-output" spellCheck={false} lang="ru" aria-label="Текст в оригинальном стиле">
       {lines.map((line, idx) => (
-        <p key={`${idx}_${line.start}_${line.text.slice(0, 16)}`} className={`doc-line doc-line-${line.type}`}>
+        <p
+          key={`${idx}_${line.start}_${line.text.slice(0, 16)}`}
+          className={`doc-line doc-line-${line.type}`}
+          spellCheck={false}
+        >
           {searchOn
             ? renderSegmentsWithSearch(line.text, line.start, sm, activeIdx, `d_${line.start}`)
             : line.text}

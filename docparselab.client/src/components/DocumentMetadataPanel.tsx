@@ -1,8 +1,9 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type { ParsedDocument } from '../types/api';
 import type { Department, UserBrief } from '../types/office';
 import { DATA_CLASSIFICATION_LABELS, DOCUMENT_TYPE_LABELS } from '../types/office';
 import { fetchDepartments, fetchOfficeUsers, updateDocumentMetadata } from '../api/office';
+import { AppSelect, optionsFromLabels } from './AppSelect';
 
 type Props = {
   token: string;
@@ -40,6 +41,23 @@ export function DocumentMetadataPanel({ token, document, onUpdated, onError }: P
     void fetchDepartments(token).then(setDepartments).catch(() => setDepartments([]));
     void fetchOfficeUsers(token).then(setUsers).catch(() => setUsers([]));
   }, [token]);
+
+  const documentTypeOptions = useMemo(() => optionsFromLabels(DOCUMENT_TYPE_LABELS), []);
+  const departmentOptions = useMemo(
+    () => [
+      { value: '', label: '— не указано —' },
+      ...departments.map((d) => ({ value: String(d.id), label: d.name })),
+    ],
+    [departments],
+  );
+  const responsibleOptions = useMemo(
+    () => [
+      { value: '', label: '— не назначен —' },
+      ...users.map((u) => ({ value: String(u.id), label: u.displayName || u.email })),
+    ],
+    [users],
+  );
+  const classificationOptions = useMemo(() => optionsFromLabels(DATA_CLASSIFICATION_LABELS), []);
 
   const save = async () => {
     setBusy(true);
@@ -86,53 +104,39 @@ export function DocumentMetadataPanel({ token, document, onUpdated, onError }: P
             </label>
             <label className="parse-field">
               <span className="parse-field-label">Тип документа</span>
-              <select value={documentType} disabled={readOnly} onChange={(e) => setDocumentType(e.target.value)}>
-                {Object.entries(DOCUMENT_TYPE_LABELS).map(([k, v]) => (
-                  <option key={k} value={k}>
-                    {v}
-                  </option>
-                ))}
-              </select>
+              <AppSelect
+                value={documentType}
+                disabled={readOnly}
+                onChange={setDocumentType}
+                options={documentTypeOptions}
+              />
             </label>
             <label className="parse-field">
               <span className="parse-field-label">Подразделение</span>
-              <select value={departmentId} disabled={readOnly} onChange={(e) => setDepartmentId(e.target.value)}>
-                <option value="">— не указано —</option>
-                {departments.map((d) => (
-                  <option key={d.id} value={d.id}>
-                    {d.name}
-                  </option>
-                ))}
-              </select>
+              <AppSelect
+                value={departmentId}
+                disabled={readOnly}
+                onChange={setDepartmentId}
+                options={departmentOptions}
+              />
             </label>
             <label className="parse-field">
               <span className="parse-field-label">Ответственный</span>
-              <select
+              <AppSelect
                 value={responsibleUserId}
                 disabled={readOnly}
-                onChange={(e) => setResponsibleUserId(e.target.value)}
-              >
-                <option value="">— не назначен —</option>
-                {users.map((u) => (
-                  <option key={u.id} value={u.id}>
-                    {u.displayName || u.email}
-                  </option>
-                ))}
-              </select>
+                onChange={setResponsibleUserId}
+                options={responsibleOptions}
+              />
             </label>
             <label className="parse-field">
               <span className="parse-field-label">Классификация</span>
-              <select
+              <AppSelect
                 value={dataClassification}
                 disabled={readOnly}
-                onChange={(e) => setDataClassification(e.target.value)}
-              >
-                {Object.entries(DATA_CLASSIFICATION_LABELS).map(([k, v]) => (
-                  <option key={k} value={k}>
-                    {v}
-                  </option>
-                ))}
-              </select>
+                onChange={setDataClassification}
+                options={classificationOptions}
+              />
             </label>
             <label className="parse-field office-card-tags">
               <span className="parse-field-label">Теги (через запятую)</span>

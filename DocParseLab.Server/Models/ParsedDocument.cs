@@ -28,6 +28,12 @@ public class ParsedDocument
     public DateTime? SubmittedAt { get; set; }
     public DateTime? WorkflowCompletedAt { get; set; }
 
+    /// <summary>Срок согласования (опционально).</summary>
+    public DateTime? ApprovalDueAt { get; set; }
+
+    /// <summary>Относительный путь к сохранённому оригиналу файла.</summary>
+    public string? OriginalStorageKey { get; set; }
+
     public int? DepartmentId { get; set; }
     public Department? Department { get; set; }
 
@@ -44,6 +50,9 @@ public class ParsedDocument
 
     public string FullText { get; set; } = string.Empty;
 
+    /// <summary>Текст сразу после OCR/извлечения, до постобработки и Hunspell.</summary>
+    public string? RawExtractedText { get; set; }
+
     public string? EditedText { get; set; }
 
     public DateTime? EditedAt { get; set; }
@@ -52,8 +61,15 @@ public class ParsedDocument
 
     public string? AiSummary { get; set; }
 
+    public int? EditLockedByUserId { get; set; }
+    public AppUser? EditLockedByUser { get; set; }
+    public DateTime? EditLockExpiresAt { get; set; }
+
     public ICollection<DocumentShare> Shares { get; set; } = new List<DocumentShare>();
     public ICollection<DocumentVersion> Versions { get; set; } = new List<DocumentVersion>();
     public ICollection<DocumentWorkflowHistory> WorkflowHistory { get; set; } = new List<DocumentWorkflowHistory>();
     public ICollection<DocumentSignature> Signatures { get; set; } = new List<DocumentSignature>();
+    public ICollection<DocumentApprovalStep> ApprovalSteps { get; set; } = new List<DocumentApprovalStep>();
+    public ICollection<DocumentComment> Comments { get; set; } = new List<DocumentComment>();
+    public ICollection<DocumentAccessLog> AccessLogs { get; set; } = new List<DocumentAccessLog>();
 }

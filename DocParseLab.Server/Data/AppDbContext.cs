@@ -25,6 +25,14 @@ public class AppDbContext : DbContext
 
     public DbSet<DocumentSignature> DocumentSignatures => Set<DocumentSignature>();
 
+    public DbSet<DocumentApprovalStep> DocumentApprovalSteps => Set<DocumentApprovalStep>();
+
+    public DbSet<UserNotification> UserNotifications => Set<UserNotification>();
+
+    public DbSet<DocumentComment> DocumentComments => Set<DocumentComment>();
+
+    public DbSet<DocumentAccessLog> DocumentAccessLogs => Set<DocumentAccessLog>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         base.OnModelCreating(modelBuilder);
@@ -65,6 +73,12 @@ public class AppDbContext : DbContext
             .HasOne(d => d.CurrentApprover)
             .WithMany()
             .HasForeignKey(d => d.CurrentApproverUserId)
+            .OnDelete(DeleteBehavior.SetNull);
+
+        modelBuilder.Entity<ParsedDocument>()
+            .HasOne(d => d.EditLockedByUser)
+            .WithMany()
+            .HasForeignKey(d => d.EditLockedByUserId)
             .OnDelete(DeleteBehavior.SetNull);
 
         modelBuilder.Entity<ParsedDocument>()
@@ -142,5 +156,57 @@ public class AppDbContext : DbContext
 
         modelBuilder.Entity<DocumentSignature>()
             .HasIndex(s => new { s.DocumentId, s.SignedAt });
+
+        modelBuilder.Entity<DocumentApprovalStep>()
+            .HasOne(s => s.Document)
+            .WithMany(d => d.ApprovalSteps)
+            .HasForeignKey(s => s.DocumentId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        modelBuilder.Entity<DocumentApprovalStep>()
+            .HasOne(s => s.Approver)
+            .WithMany()
+            .HasForeignKey(s => s.ApproverUserId)
+            .OnDelete(DeleteBehavior.Restrict);
+
+        modelBuilder.Entity<DocumentApprovalStep>()
+            .HasIndex(s => new { s.DocumentId, s.StepOrder })
+            .IsUnique();
+
+        modelBuilder.Entity<UserNotification>()
+            .HasOne(n => n.User)
+            .WithMany()
+            .HasForeignKey(n => n.UserId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        modelBuilder.Entity<UserNotification>()
+            .HasIndex(n => new { n.UserId, n.IsRead, n.CreatedAt });
+
+        modelBuilder.Entity<DocumentComment>()
+            .HasOne(c => c.Document)
+            .WithMany(d => d.Comments)
+            .HasForeignKey(c => c.DocumentId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        modelBuilder.Entity<DocumentComment>()
+            .HasOne(c => c.User)
+            .WithMany()
+            .HasForeignKey(c => c.UserId)
+            .OnDelete(DeleteBehavior.Restrict);
+
+        modelBuilder.Entity<DocumentAccessLog>()
+            .HasOne(l => l.Document)
+            .WithMany(d => d.AccessLogs)
+            .HasForeignKey(l => l.DocumentId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        modelBuilder.Entity<DocumentAccessLog>()
+            .HasOne(l => l.User)
+            .WithMany()
+            .HasForeignKey(l => l.UserId)
+            .OnDelete(DeleteBehavior.SetNull);
+
+        modelBuilder.Entity<DocumentAccessLog>()
+            .HasIndex(l => new { l.DocumentId, l.CreatedAt });
     }
 }

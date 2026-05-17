@@ -8,7 +8,9 @@ type Props = {
   documentTextLocked: boolean;
   onBack?: () => void;
   onDownloadJson: () => void;
-  onExport: (format: 'docx' | 'pdf') => void;
+  onExport: (format: 'docx' | 'pdf' | 'signed-pdf') => void;
+  onDownloadOriginal?: () => void;
+  editLockMessage?: string | null;
   onSendEmail?: () => void;
   onDelete?: () => void;
   sidebar: ReactNode;
@@ -23,6 +25,8 @@ export function DocumentWorkspace({
   onBack,
   onDownloadJson,
   onExport,
+  onDownloadOriginal,
+  editLockMessage,
   onSendEmail,
   onDelete,
   sidebar,
@@ -76,6 +80,16 @@ export function DocumentWorkspace({
           <button type="button" className="btn-secondary btn-sm" onClick={() => onExport('pdf')}>
             PDF
           </button>
+          {(document.signatureCount ?? 0) > 0 && (
+            <button type="button" className="btn-secondary btn-sm" onClick={() => onExport('signed-pdf')}>
+              PDF с подписью
+            </button>
+          )}
+          {document.hasOriginalFile && onDownloadOriginal && (
+            <button type="button" className="btn-secondary btn-sm" onClick={onDownloadOriginal}>
+              Оригинал
+            </button>
+          )}
         </div>
       </header>
 
@@ -96,20 +110,16 @@ export function DocumentWorkspace({
           <dt>Классификация</dt>
           <dd>{classLabel}</dd>
         </div>
-        <div>
-          <dt>Профиль</dt>
-          <dd>{document.processingProfile ?? 'general'}</dd>
-        </div>
         {document.departmentName && (
           <div>
             <dt>Подразделение</dt>
-            <dd>{document.departmentName}</dd>
+            <dd title={document.departmentName}>{document.departmentName}</dd>
           </div>
         )}
         {document.responsibleUserEmail && (
           <div>
             <dt>Ответственный</dt>
-            <dd>{document.responsibleUserEmail}</dd>
+            <dd title={document.responsibleUserEmail}>{document.responsibleUserEmail}</dd>
           </div>
         )}
       </dl>
@@ -118,6 +128,9 @@ export function DocumentWorkspace({
         <p className="office-card-readonly-hint doc-workspace__lock-banner">
           Редактирование текста недоступно: документ на согласовании, согласован или в архиве.
         </p>
+      )}
+      {editLockMessage && (
+        <p className="office-card-readonly-hint doc-workspace__lock-banner">{editLockMessage}</p>
       )}
 
       <div className="doc-workspace__grid">

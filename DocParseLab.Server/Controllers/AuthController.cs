@@ -1,10 +1,12 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using DocParseLab.Server.Data;
 using DocParseLab.Server.DTOs;
 using DocParseLab.Server.Extensions;
 using DocParseLab.Server.Models;
+using DocParseLab.Server.Services;
 
 namespace DocParseLab.Server.Controllers;
 
@@ -14,12 +16,18 @@ public class AuthController : ControllerBase
 {
     private readonly AppDbContext _db;
     private readonly IConfiguration _configuration;
+    private readonly ILdapAuthenticationService _ldap;
     private readonly ILogger<AuthController> _logger;
 
-    public AuthController(AppDbContext db, IConfiguration configuration, ILogger<AuthController> logger)
+    public AuthController(
+        AppDbContext db,
+        IConfiguration configuration,
+        ILdapAuthenticationService ldap,
+        ILogger<AuthController> logger)
     {
         _db = db;
         _configuration = configuration;
+        _ldap = ldap;
         _logger = logger;
     }
 
@@ -54,6 +62,7 @@ public class AuthController : ControllerBase
 
     [HttpPost("login")]
     [AllowAnonymous]
+    [EnableRateLimiting("api")]
     [ProducesResponseType(typeof(AuthResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status400BadRequest)]
     [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status401Unauthorized)]
@@ -66,8 +75,17 @@ public class AuthController : ControllerBase
         var user = await _db.Users
             .Include(u => u.Department)
             .FirstOrDefaultAsync(u => u.Email.ToLower() == email, cancellationToken);
-        if (user == null || !VerifyPassword(request.Password, user.PasswordHash, user.PasswordSalt))
+
+        var ldapOk = await _ldap.TryAuthenticateAsync(email, request.Password, cancellationToken);
+        if (ldapOk.Ok)
+        {
+            if (user == null)
+                return Unauthorized("LDAP: пользователь не заведён в системе. Обратитесь к администратору.");
+        }
+        else if (user == null || !PasswordHasher.VerifyPassword(request.Password, user.PasswordHash, user.PasswordSalt))
+        {
             return Unauthorized("Неверный email или пароль.");
+        }
 
         _logger.LogInformation("Пользователь {Email} вошёл в систему", email);
         return Ok(await BuildAuthResponseAsync(user, cancellationToken));
@@ -92,25 +110,29 @@ public class AuthController : ControllerBase
             });
         }
 
-        if (string.IsNullOrWhiteSpace(request.Email) || string.IsNullOrWhiteSpace(request.Password))
-            return BadRequest(new ErrorResponse { Message = "Email и пароль обязательны." });
+        if (string.IsNullOrWhiteSpace(request.Email) || string.IsNullOrWhiteSpace(request.Password)
+            || string.IsNullOrWhiteSpace(request.DisplayName))
+            return BadRequest(new ErrorResponse { Message = "Укажите email, ФИО (логин) и пароль." });
+
+        if (request.Password.Length < 6)
+            return BadRequest(new ErrorResponse { Message = "Пароль должен быть не короче 6 символов." });
+
+        if (request.DepartmentId <= 0)
+            return BadRequest(new ErrorResponse { Message = "Выберите подразделение." });
 
         var role = string.IsNullOrWhiteSpace(request.Role) ? UserRoles.Employee : request.Role.Trim();
         if (!UserRoles.All.Contains(role))
             return BadRequest(new ErrorResponse { Message = "Недопустимая роль." });
 
-        if (request.DepartmentId is int depId)
-        {
-            var depExists = await _db.Departments.AnyAsync(d => d.Id == depId, cancellationToken);
-            if (!depExists)
-                return BadRequest(new ErrorResponse { Message = "Подразделение не найдено." });
-        }
+        var depExists = await _db.Departments.AnyAsync(d => d.Id == request.DepartmentId, cancellationToken);
+        if (!depExists)
+            return BadRequest(new ErrorResponse { Message = "Подразделение не найдено." });
 
         var email = request.Email.Trim().ToLowerInvariant();
         if (await _db.Users.AnyAsync(u => u.Email.ToLower() == email, cancellationToken))
             return Conflict(new ErrorResponse { Message = "Пользователь с таким email уже существует." });
 
-        var (hash, salt) = HashPassword(request.Password);
+        var (hash, salt) = PasswordHasher.HashPassword(request.Password);
         var user = new AppUser
         {
             Email = email,
@@ -118,7 +140,7 @@ public class AuthController : ControllerBase
             PasswordSalt = salt,
             Role = role,
             DepartmentId = request.DepartmentId,
-            DisplayName = string.IsNullOrWhiteSpace(request.DisplayName) ? null : request.DisplayName.Trim(),
+            DisplayName = request.DisplayName.Trim(),
             CreatedAt = DateTime.UtcNow,
         };
 
@@ -182,7 +204,7 @@ public class AuthController : ControllerBase
         if (await _db.Users.AnyAsync(u => u.Email.ToLower() == email, cancellationToken))
             return Conflict(new ErrorResponse { Message = "Пользователь с таким email уже существует." });
 
-        var (hash, salt) = HashPassword(request.Password);
+        var (hash, salt) = PasswordHasher.HashPassword(request.Password);
         var user = new AppUser
         {
             Email = email,
@@ -215,32 +237,6 @@ public class AuthController : ControllerBase
             DepartmentName = user.Department?.Name,
             DisplayName = user.DisplayName,
         };
-    }
-
-    private (string Hash, string Salt) HashPassword(string password)
-    {
-        using var rng = System.Security.Cryptography.RandomNumberGenerator.Create();
-        var saltBytes = new byte[16];
-        rng.GetBytes(saltBytes);
-        var salt = Convert.ToBase64String(saltBytes);
-
-        using var deriveBytes = new System.Security.Cryptography.Rfc2898DeriveBytes(
-            password, saltBytes, 100_000, System.Security.Cryptography.HashAlgorithmName.SHA256);
-        var hashBytes = deriveBytes.GetBytes(32);
-        var hash = Convert.ToBase64String(hashBytes);
-
-        return (hash, salt);
-    }
-
-    private static bool VerifyPassword(string password, string storedHash, string storedSalt)
-    {
-        var saltBytes = Convert.FromBase64String(storedSalt);
-        using var deriveBytes = new System.Security.Cryptography.Rfc2898DeriveBytes(
-            password, saltBytes, 100_000, System.Security.Cryptography.HashAlgorithmName.SHA256);
-        var hashBytes = deriveBytes.GetBytes(32);
-        var hash = Convert.ToBase64String(hashBytes);
-
-        return hash == storedHash;
     }
 
     private string GenerateToken(AppUser user)

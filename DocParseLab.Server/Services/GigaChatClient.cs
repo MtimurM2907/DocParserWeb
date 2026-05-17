@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
+using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Options;
 
 namespace DocParseLab.Server.Services;
@@ -11,11 +12,13 @@ public class GigaChatClient : IGigaChatClient
 {
     private readonly HttpClient _httpClient;
     private readonly GigaChatOptions _options;
+    private readonly IMemoryCache _cache;
 
-    public GigaChatClient(HttpClient httpClient, IOptions<GigaChatOptions> options)
+    public GigaChatClient(HttpClient httpClient, IOptions<GigaChatOptions> options, IMemoryCache cache)
     {
         _httpClient = httpClient;
         _options = options.Value;
+        _cache = cache;
     }
 
     public async Task<GigaChatResult> GetStructuredJsonAsync(string plainText, CancellationToken cancellationToken = default)
@@ -27,6 +30,9 @@ public class GigaChatClient : IGigaChatClient
 
         var maxChars = 12000;
         var truncated = plainText.Length > maxChars ? plainText[..maxChars] : plainText;
+        var cacheKey = "gigachat:" + GigaChatCacheKeys.ForText(truncated);
+        if (_cache.TryGetValue(cacheKey, out GigaChatResult? cached) && cached != null)
+            return cached;
 
         var token = await GetAccessTokenAsync(cancellationToken);
 
@@ -76,33 +82,9 @@ public class GigaChatClient : IGigaChatClient
             structuredJson = jsonRaw;
         }
 
-        return new GigaChatResult(structuredJson, description);
-    }
-
-    public async Task<RewriteResult> RewriteTextAsync(
-        string text,
-        string mode,
-        string? tone = null,
-        string? length = null,
-        CancellationToken cancellationToken = default)
-    {
-        if (string.IsNullOrWhiteSpace(text))
-        {
-            return new RewriteResult(string.Empty, "Пустой текст.");
-        }
-
-        var maxChars = 12000;
-        var truncated = text.Length > maxChars ? text[..maxChars] : text;
-        var token = await GetAccessTokenAsync(cancellationToken);
-
-        var systemPrompt =
-            "Ты редактор русского текста. Перепиши текст строго на русском языке, сохранив фактический смысл. " +
-            $"Режим переписывания: {mode}. Тон: {tone ?? "нейтральный"}. Длина: {length ?? "сопоставимая с оригиналом"}. " +
-            "Верни только итоговый переписанный текст без JSON.";
-
-        var rewritten = await SendChatRequestAsync(token, systemPrompt, truncated, cancellationToken);
-        var comment = string.IsNullOrWhiteSpace(rewritten) ? "Модель вернула пустой ответ." : "OK";
-        return new RewriteResult(rewritten, comment);
+        var result = new GigaChatResult(structuredJson, description);
+        _cache.Set(cacheKey, result, TimeSpan.FromHours(12));
+        return result;
     }
 
     public async Task<IReadOnlyList<SpellcheckMistakeDto>> SpellcheckSegmentAsync(
@@ -273,14 +255,28 @@ public class GigaChatClient : IGigaChatClient
 
     private async Task<string> GetAccessTokenAsync(CancellationToken cancellationToken)
     {
+        var authorization = _options.ResolveAuthorization();
+        if (string.IsNullOrWhiteSpace(authorization))
+        {
+            throw new InvalidOperationException(
+                "GigaChat не настроен. Скопируйте gigachat.secrets.json.example → gigachat.secrets.json " +
+                "и укажите ClientId и ClientSecret из https://developers.sber.ru/ (проект GigaChat API). " +
+                "Либо задайте GigaChat__ClientId и GigaChat__ClientSecret в переменных окружения.");
+        }
+
         using var request = new HttpRequestMessage(HttpMethod.Post, _options.AuthUrl);
-        request.Headers.Authorization = AuthenticationHeaderValue.Parse(_options.Authorization);
+        request.Headers.Authorization = AuthenticationHeaderValue.Parse(authorization);
         request.Headers.Add("RqUID", Guid.NewGuid().ToString());
 
         request.Content = new StringContent($"scope={_options.Scope}", Encoding.UTF8, "application/x-www-form-urlencoded");
 
         using var response = await _httpClient.SendAsync(request, cancellationToken);
-        response.EnsureSuccessStatusCode();
+        if (!response.IsSuccessStatusCode)
+        {
+            var errorBody = await response.Content.ReadAsStringAsync(cancellationToken);
+            throw new HttpRequestException(
+                $"GigaChat OAuth: {(int)response.StatusCode} {response.ReasonPhrase}. {errorBody}");
+        }
 
         await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
         var tokenResponse = await JsonSerializer.DeserializeAsync<TokenResponse>(stream, cancellationToken: cancellationToken);

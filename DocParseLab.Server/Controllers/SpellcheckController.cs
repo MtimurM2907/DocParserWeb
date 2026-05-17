@@ -12,18 +12,15 @@ namespace DocParseLab.Server.Controllers;
 [Route("api/[controller]")]
 public sealed class SpellcheckController : ControllerBase
 {
-    private readonly ISpellcheckService _aiSpellcheck;
     private readonly HunspellSpellcheckService _hunspell;
     private readonly AppDbContext _db;
     private readonly ILogger<SpellcheckController> _logger;
 
     public SpellcheckController(
-        ISpellcheckService aiSpellcheck,
         HunspellSpellcheckService hunspell,
         AppDbContext db,
         ILogger<SpellcheckController> logger)
     {
-        _aiSpellcheck = aiSpellcheck;
         _hunspell = hunspell;
         _db = db;
         _logger = logger;
@@ -45,8 +42,8 @@ public sealed class SpellcheckController : ControllerBase
                 return BadRequest(new ErrorResponse { Message = "Некорректное тело запроса." });
             }
 
-            ISpellcheckService engine = _aiSpellcheck;
-            var engineName = "gigachat";
+            ISpellcheckService engine = _hunspell;
+            var engineName = "hunspell";
 
             if (request.DocumentId is int docId)
             {
@@ -77,15 +74,14 @@ public sealed class SpellcheckController : ControllerBase
                     }
                 }
 
-                if (string.Equals(doc.DataClassification, "Confidential", StringComparison.OrdinalIgnoreCase))
-                {
-                    engine = _hunspell;
-                    engineName = "hunspell";
-                }
             }
 
             var response = await engine.CheckAsync(request, cancellationToken);
-            response.SpellcheckEngine = engineName;
+            if (string.IsNullOrEmpty(response.SpellcheckEngine))
+            {
+                response.SpellcheckEngine = engineName;
+            }
+
             return Ok(response);
         }
         catch (InvalidOperationException ex)

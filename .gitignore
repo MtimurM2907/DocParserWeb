@@ -40,9 +40,15 @@ yarn-error.log*
 dist/
 build/
 publish/
+.build-out/
+_build_out/
+
+## Word lock files
+~$*
 
 ## Frontend build output copied into backend (generated)
 DocParseLab.Server/wwwroot/
+DocParseLab.Server/Data/uploads/
 
 ## Environment variables
 .env
@@ -52,6 +58,7 @@ DocParseLab.Server/wwwroot/
 ## Sensitive configuration (не коммитить реальные ключи!)
 appsettings.Production.json
 !appsettings.Production.json.example
+gigachat.secrets.json
 
 ## IDE
 .idea/

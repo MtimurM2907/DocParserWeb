@@ -1,11 +1,14 @@
 using System.Net.Http;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
+using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using Polly;
 using DocParseLab.Server.Data;
+using DocParseLab.Server.Hubs;
 using DocParseLab.Server.Services;
 
 namespace DocParseLab.Server.Extensions;
@@ -20,6 +23,7 @@ public static class ServiceCollectionExtensions
     /// </summary>
     public static IServiceCollection AddApplicationServices(this IServiceCollection services, IConfiguration configuration)
     {
+        services.AddMemoryCache();
         services.AddHttpContextAccessor();
         services.AddHttpClient();
         services.Configure<EnterpriseOptions>(configuration.GetSection(EnterpriseOptions.SectionName));
@@ -31,15 +35,31 @@ public static class ServiceCollectionExtensions
         services.AddScoped<IDocumentVersionService, DocumentVersionService>();
         services.AddScoped<IDocumentWorkflowService, DocumentWorkflowService>();
         services.AddScoped<IDocumentSignatureService, DocumentSignatureService>();
+        services.AddScoped<INotificationService, NotificationService>();
+        services.AddScoped<IDocumentAccessLogService, DocumentAccessLogService>();
+        services.AddScoped<IDocumentFileStorageService, LocalDocumentFileStorageService>();
+        services.AddSingleton<ITextDiffService, TextDiffService>();
+        services.Configure<LdapOptions>(configuration.GetSection(LdapOptions.SectionName));
+        services.Configure<FileScanOptions>(configuration.GetSection(FileScanOptions.SectionName));
+        services.AddScoped<ILdapAuthenticationService, LdapAuthenticationService>();
+        services.AddScoped<IFileScanService, FileScanService>();
+        services.AddScoped<IDocumentEditLockService, DocumentEditLockService>();
+        services.AddScoped<IExternalSignatureService, ExternalSignatureService>();
+        services.AddScoped<IDocumentRealtimeService, DocumentRealtimeService>();
+        services.AddSignalR();
 
         services.AddScoped<IPdfParserService, PdfParserService>();
         services.AddScoped<IDocumentTextExtractor, PdfTextExtractor>();
         services.AddScoped<IDocumentTextExtractor, DocxTextExtractor>();
         services.AddScoped<IDocumentExportService, DocumentExportService>();
+        services.AddSingleton<RussianHunspellDictionary>();
         services.AddSingleton<HunspellSpellcheckService>();
-        services.AddScoped<ISpellcheckService, AiSpellcheckService>();
+        services.AddScoped<AiSpellcheckService>();
+        services.AddScoped<ISpellcheckService, HunspellSpellcheckService>();
         services.AddScoped<IEmailSender, SmtpEmailSender>();
-        services.AddSingleton<IOcrService, TesseractOcrService>();
+        services.AddSingleton<TesseractOcrService>();
+        services.AddSingleton<IOcrService, CompositeOcrService>();
+        services.AddSingleton<IPdfPageRenderer, DocnetPdfPageRenderer>();
         services.Configure<GigaChatOptions>(configuration.GetSection(GigaChatOptions.SectionName));
         services.Configure<SmtpOptions>(configuration.GetSection(SmtpOptions.SectionName));
         services.Configure<OcrOptions>(configuration.GetSection(OcrOptions.SectionName));
@@ -93,6 +113,17 @@ public static class ServiceCollectionExtensions
                 return handler;
             });
         
+        services.AddRateLimiter(options =>
+        {
+            options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+            options.AddFixedWindowLimiter("api", limiter =>
+            {
+                limiter.Window = TimeSpan.FromMinutes(1);
+                limiter.PermitLimit = 180;
+                limiter.QueueLimit = 0;
+            });
+        });
+
         return services;
     }
 
@@ -129,6 +160,17 @@ public static class ServiceCollectionExtensions
                     IssuerSigningKey = signingKey,
                     ValidateLifetime = true,
                     ClockSkew = TimeSpan.FromMinutes(2)
+                };
+                options.Events = new JwtBearerEvents
+                {
+                    OnMessageReceived = context =>
+                    {
+                        var accessToken = context.Request.Query["access_token"];
+                        var path = context.HttpContext.Request.Path;
+                        if (!string.IsNullOrEmpty(accessToken) && path.StartsWithSegments("/hubs"))
+                            context.Token = accessToken;
+                        return Task.CompletedTask;
+                    }
                 };
             });
 

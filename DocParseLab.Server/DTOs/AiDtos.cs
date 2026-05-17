@@ -1,19 +1,14 @@
 namespace DocParseLab.Server.DTOs;
 
-public sealed class RewriteRequest
+public sealed class GigaChatStatusResponse
 {
-    public string Text { get; set; } = string.Empty;
-    public string Mode { get; set; } = "Более формально";
-    public string? Tone { get; set; }
-    public string? Length { get; set; }
-
-    /// <summary>При указании и авторизации: для Confidential переписывание через GigaChat запрещено.</summary>
-    public int? DocumentId { get; set; }
+    public bool Configured { get; set; }
 }
 
-public sealed class RewriteResponse
+public sealed class DocumentSummaryResponse
 {
-    public string RewrittenText { get; set; } = string.Empty;
-    public string ModelComment { get; set; } = string.Empty;
-}
+    public string AiSummary { get; set; } = string.Empty;
 
+    /// <summary>gigachat | local</summary>
+    public string Source { get; set; } = "local";
+}

@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using System.Net.Mail;
 using DocParseLab.Server.Data;
@@ -27,6 +28,11 @@ public class PdfController : ControllerBase
     private readonly IDocumentAccessService _access;
     private readonly IDocumentVersionService _versions;
     private readonly IDocumentSignatureService _signatures;
+    private readonly IDocumentAccessLogService _accessLog;
+    private readonly IDocumentFileStorageService _fileStorage;
+    private readonly IFileScanService _fileScan;
+    private readonly IDocumentEditLockService _editLock;
+    private readonly IPdfPageRenderer _pageRenderer;
 
     public PdfController(
         AppDbContext db,
@@ -38,7 +44,12 @@ public class PdfController : ControllerBase
         IWebhookService webhook,
         IDocumentAccessService access,
         IDocumentVersionService versions,
-        IDocumentSignatureService signatures)
+        IDocumentSignatureService signatures,
+        IDocumentAccessLogService accessLog,
+        IDocumentFileStorageService fileStorage,
+        IFileScanService fileScan,
+        IDocumentEditLockService editLock,
+        IPdfPageRenderer pageRenderer)
     {
         _db = db;
         _parserService = parserService;
@@ -50,6 +61,11 @@ public class PdfController : ControllerBase
         _access = access;
         _versions = versions;
         _signatures = signatures;
+        _accessLog = accessLog;
+        _fileStorage = fileStorage;
+        _fileScan = fileScan;
+        _editLock = editLock;
+        _pageRenderer = pageRenderer;
     }
 
     /// <summary>
@@ -60,6 +76,7 @@ public class PdfController : ControllerBase
     /// <returns>Распарсенный документ</returns>
     [HttpPost("parse")]
     [Authorize]
+    [EnableRateLimiting("api")]
     [Consumes("multipart/form-data")]
     [RequestSizeLimit(50 * 1024 * 1024)]
     [ProducesResponseType(typeof(ParsedDocumentResponse), StatusCodes.Status200OK)]
@@ -79,6 +96,15 @@ public class PdfController : ControllerBase
         if (file == null || file.Length == 0)
         {
             return BadRequest("Файл не передан.");
+        }
+
+        try
+        {
+            _fileScan.ValidateUpload(file);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new ErrorResponse { Message = ex.Message });
         }
 
         var ext = Path.GetExtension(file.FileName);
@@ -354,7 +380,159 @@ public class PdfController : ControllerBase
         if (!await _access.CanReadAsync(currentUserId, document, cancellationToken))
             return Forbid("У вас нет доступа к этому документу.");
 
+        await _accessLog.LogAsync(id, currentUserId, "view", HttpContext.Connection.RemoteIpAddress?.ToString(), cancellationToken);
         return Ok(await MapDocumentResponseAsync(document, currentUserId, cancellationToken));
+    }
+
+    [HttpGet("{id:int}/shares")]
+    [Authorize]
+    public async Task<ActionResult<List<DocumentShareItemResponse>>> GetDocumentShares(int id, CancellationToken cancellationToken)
+    {
+        if (!User.TryGetUserId(out var currentUserId))
+            return Unauthorized();
+
+        var document = await _db.ParsedDocuments.FirstOrDefaultAsync(d => d.Id == id, cancellationToken);
+        if (document == null)
+            return NotFound();
+        if (document.OwnerId != currentUserId && !User.IsAdmin())
+            return Forbid();
+
+        var items = await _db.DocumentShares
+            .Include(s => s.ToUser)
+            .Where(s => s.DocumentId == id)
+            .OrderByDescending(s => s.SharedAt)
+            .Select(s => new DocumentShareItemResponse
+            {
+                ShareId = s.Id,
+                ToUserId = s.ToUserId,
+                ToUserEmail = s.ToUser.Email,
+                SharedAt = s.SharedAt,
+            })
+            .ToListAsync(cancellationToken);
+        return Ok(items);
+    }
+
+    [HttpDelete("{id:int}/shares/{shareId:int}")]
+    [Authorize]
+    public async Task<IActionResult> RevokeShare(int id, int shareId, CancellationToken cancellationToken)
+    {
+        if (!User.TryGetUserId(out var currentUserId))
+            return Unauthorized();
+
+        var document = await _db.ParsedDocuments.FirstOrDefaultAsync(d => d.Id == id, cancellationToken);
+        if (document == null)
+            return NotFound();
+        if (document.OwnerId != currentUserId && !User.IsAdmin())
+            return Forbid();
+
+        var share = await _db.DocumentShares.FirstOrDefaultAsync(s => s.Id == shareId && s.DocumentId == id, cancellationToken);
+        if (share == null)
+            return NotFound();
+
+        _db.DocumentShares.Remove(share);
+        await _db.SaveChangesAsync(cancellationToken);
+        await _audit.LogAsync("document.share_revoke", $"document:{id}", $"share:{shareId}", cancellationToken);
+        return NoContent();
+    }
+
+    [HttpGet("{id:int}/original")]
+    [Authorize]
+    public async Task<IActionResult> DownloadOriginal(int id, CancellationToken cancellationToken)
+    {
+        if (!User.TryGetUserId(out var currentUserId))
+            return Unauthorized();
+
+        var document = await _db.ParsedDocuments
+            .Include(d => d.Shares)
+            .FirstOrDefaultAsync(d => d.Id == id, cancellationToken);
+        if (document == null)
+            return NotFound();
+        if (!await _access.CanReadAsync(currentUserId, document, cancellationToken))
+            return Forbid();
+
+        var file = await _fileStorage.OpenOriginalAsync(document, cancellationToken);
+        if (file == null)
+            return NotFound("Оригинальный файл не сохранён.");
+
+        await _accessLog.LogAsync(id, currentUserId, "download_original", HttpContext.Connection.RemoteIpAddress?.ToString(), cancellationToken);
+        return File(file.Value.Stream, file.Value.ContentType, file.Value.FileName);
+    }
+
+    /// <summary>Число страниц оригинального PDF.</summary>
+    [HttpGet("{id:int}/page-count")]
+    [Authorize]
+    [ProducesResponseType(typeof(PdfPageCountResponse), StatusCodes.Status200OK)]
+    public async Task<ActionResult<PdfPageCountResponse>> GetPdfPageCount(int id, CancellationToken cancellationToken)
+    {
+        if (!User.TryGetUserId(out var currentUserId))
+            return Unauthorized();
+
+        var document = await _db.ParsedDocuments
+            .Include(d => d.Shares)
+            .FirstOrDefaultAsync(d => d.Id == id, cancellationToken);
+        if (document == null) return NotFound();
+        if (!await _access.CanReadAsync(currentUserId, document, cancellationToken)) return Forbid();
+
+        if (!string.Equals(document.OriginalFileType, "pdf", StringComparison.OrdinalIgnoreCase))
+            return Ok(new PdfPageCountResponse { PageCount = 1 });
+
+        var file = await _fileStorage.OpenOriginalAsync(document, cancellationToken);
+        if (file == null) return NotFound("Оригинальный файл не сохранён.");
+
+        await using var ms = new MemoryStream();
+        await file.Value.Stream.CopyToAsync(ms, cancellationToken);
+        var pdfBytes = ms.ToArray();
+        if (pdfBytes.Length == 0) return NotFound();
+
+        var pageCount = Math.Max(1, _pageRenderer.GetPageCount(pdfBytes));
+        return Ok(new PdfPageCountResponse { PageCount = pageCount });
+    }
+
+    /// <summary>Превью страницы оригинального PDF (1-based).</summary>
+    [HttpGet("{id:int}/pages/{page:int}/preview")]
+    [Authorize]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> GetPagePreview(int id, int page, CancellationToken cancellationToken)
+    {
+        if (page < 1) return BadRequest("Номер страницы должен быть ≥ 1.");
+
+        if (!User.TryGetUserId(out var currentUserId))
+            return Unauthorized();
+
+        var document = await _db.ParsedDocuments
+            .Include(d => d.Shares)
+            .FirstOrDefaultAsync(d => d.Id == id, cancellationToken);
+        if (document == null) return NotFound();
+        if (!await _access.CanReadAsync(currentUserId, document, cancellationToken)) return Forbid();
+
+        if (!string.Equals(document.OriginalFileType, "pdf", StringComparison.OrdinalIgnoreCase))
+            return BadRequest("Превью страниц доступно только для PDF.");
+
+        var file = await _fileStorage.OpenOriginalAsync(document, cancellationToken);
+        if (file == null) return NotFound("Оригинальный файл не сохранён.");
+
+        await using var ms = new MemoryStream();
+        await file.Value.Stream.CopyToAsync(ms, cancellationToken);
+        var pdfBytes = ms.ToArray();
+        if (pdfBytes.Length == 0) return NotFound();
+
+        var pageIndex = page - 1;
+        byte[] png;
+        try
+        {
+            png = _pageRenderer.RenderPageToPng(pdfBytes, pageIndex);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Не удалось отрендерить превью страницы {Page} документа {Id}", page, id);
+            return NotFound("Страница не найдена.");
+        }
+
+        if (png.Length == 0) return NotFound("Страница не найдена.");
+
+        await _accessLog.LogAsync(id, currentUserId, "page_preview", HttpContext.Connection.RemoteIpAddress?.ToString(), cancellationToken);
+        return File(png, "image/png");
     }
 
     /// <summary>
@@ -385,6 +563,15 @@ public class PdfController : ControllerBase
 
         if (!await _access.CanEditContentAsync(currentUserId, document, cancellationToken))
             return Forbid("Редактирование недоступно: нет прав или документ на согласовании.");
+
+        try
+        {
+            await _editLock.EnsureCanEditAsync(document, currentUserId, cancellationToken);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return Conflict(new ErrorResponse { Message = ex.Message });
+        }
 
         var newText = request.Text ?? string.Empty;
         if (newText.Length > 2_000_000)
@@ -449,27 +636,35 @@ public class PdfController : ControllerBase
             return Unauthorized();
         }
 
-        var document = await _db.ParsedDocuments
-            .Include(d => d.Shares)
-            .FirstOrDefaultAsync(d => d.Id == id, cancellationToken);
+        var document = await LoadDocumentFullAsync(id, cancellationToken);
         if (document == null)
-        {
             return NotFound("Документ не найден.");
-        }
 
-        var hasAccess = document.OwnerId == currentUserId || document.Shares.Any(s => s.ToUserId == currentUserId);
-        if (!hasAccess)
-        {
+        if (!await _access.CanReadAsync(currentUserId, document, cancellationToken))
             return Forbid("У вас нет доступа к этому документу.");
-        }
 
         var text = document.EditedText ?? document.FullText;
         var safeName = Path.GetFileNameWithoutExtension(document.FileName);
+
+        if (string.Equals(format, "signed-pdf", StringComparison.OrdinalIgnoreCase))
+        {
+            var sigs = await _signatures.GetSignaturesAsync(id, cancellationToken);
+            var stamps = sigs.Select(s => new SignatureStampLine(
+                s.SignerDisplayNameSnapshot ?? s.SignerEmailSnapshot,
+                s.SignedAt,
+                s.TextHashSha256[..Math.Min(16, s.TextHashSha256.Length)] + "…",
+                s.Comment)).ToList();
+            var bytes = _exportService.ExportToSignedPdf(safeName, text, stamps);
+            await _audit.LogAsync("document.export", $"document:{id}", "signed-pdf", cancellationToken);
+            await _accessLog.LogAsync(id, currentUserId, "export_signed_pdf", HttpContext.Connection.RemoteIpAddress?.ToString(), cancellationToken);
+            return File(bytes, "application/pdf", $"{safeName}-signed.pdf");
+        }
 
         if (string.Equals(format, "pdf", StringComparison.OrdinalIgnoreCase))
         {
             var bytes = _exportService.ExportToPdf(safeName, text);
             await _audit.LogAsync("document.export", $"document:{id}", "pdf", cancellationToken);
+            await _accessLog.LogAsync(id, currentUserId, "export_pdf", HttpContext.Connection.RemoteIpAddress?.ToString(), cancellationToken);
             await _webhook.NotifyAsync("document.exported", new { documentId = id, format = "pdf" }, cancellationToken);
             return File(bytes, "application/pdf", $"{safeName}.pdf");
         }
@@ -496,7 +691,7 @@ public class PdfController : ControllerBase
     {
         var verify = await _signatures.VerifyAsync(document, cancellationToken);
         var flags = await _signatures.GetUiFlagsAsync(currentUserId, document, cancellationToken);
-        return ParsedDocumentResponse.FromEntity(
+        var response = ParsedDocumentResponse.FromEntity(
             document,
             document.Owner?.Email,
             document.Shares.Count,
@@ -509,5 +704,27 @@ public class PdfController : ControllerBase
             verify.TextMatchesLastSignature,
             verify.LastSignedAt,
             verify.LastSignerEmail);
+        response.OriginalPageCount = await TryGetOriginalPageCountAsync(document, cancellationToken);
+        return response;
+    }
+
+    private async Task<int?> TryGetOriginalPageCountAsync(ParsedDocument document, CancellationToken cancellationToken)
+    {
+        if (!string.Equals(document.OriginalFileType, "pdf", StringComparison.OrdinalIgnoreCase))
+            return null;
+        if (string.IsNullOrEmpty(document.OriginalStorageKey))
+            return null;
+
+        var file = await _fileStorage.OpenOriginalAsync(document, cancellationToken);
+        if (file == null)
+            return null;
+
+        await using var ms = new MemoryStream();
+        await file.Value.Stream.CopyToAsync(ms, cancellationToken);
+        var pdfBytes = ms.ToArray();
+        if (pdfBytes.Length == 0)
+            return null;
+
+        return Math.Max(1, _pageRenderer.GetPageCount(pdfBytes));
     }
 }

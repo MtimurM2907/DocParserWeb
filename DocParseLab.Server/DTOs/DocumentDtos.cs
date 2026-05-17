@@ -43,6 +43,10 @@ public sealed class ParsedDocumentResponse
     public bool TextIntegrityValid { get; set; } = true;
     public DateTime? LastSignedAt { get; set; }
     public string? LastSignerEmail { get; set; }
+    public bool HasOriginalFile { get; set; }
+
+    /// <summary>Число страниц оригинального PDF (если файл сохранён).</summary>
+    public int? OriginalPageCount { get; set; }
 
     public static ParsedDocumentResponse FromEntity(
         ParsedDocument entity,
@@ -69,7 +73,9 @@ public sealed class ParsedDocumentResponse
             AiSummary = entity.AiSummary,
             // Для отображения возвращаем "актуальный" текст (с учётом правок),
             // но также отдаём EditedText отдельно, чтобы UI мог показать состояние.
-            OriginalText = entity.FullText,
+            OriginalText = !string.IsNullOrWhiteSpace(entity.RawExtractedText)
+                ? entity.RawExtractedText
+                : entity.FullText,
             FullText = entity.EditedText ?? entity.FullText,
             EditedText = entity.EditedText,
             EditedAt = entity.EditedAt,
@@ -101,6 +107,7 @@ public sealed class ParsedDocumentResponse
             TextIntegrityValid = textIntegrityValid,
             LastSignedAt = lastSignedAt,
             LastSignerEmail = lastSignerEmail,
+            HasOriginalFile = !string.IsNullOrEmpty(entity.OriginalStorageKey),
         };
     }
 }
@@ -137,6 +144,11 @@ public sealed class DocumentBriefResponse
                 : entity.AiSummary
         };
     }
+}
+
+public sealed class PdfPageCountResponse
+{
+    public int PageCount { get; set; }
 }
 
 public sealed class SendDocumentEmailRequest

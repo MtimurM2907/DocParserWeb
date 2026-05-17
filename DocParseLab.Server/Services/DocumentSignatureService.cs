@@ -32,17 +32,20 @@ public interface IDocumentSignatureService
         int? userId,
         ParsedDocument document,
         CancellationToken cancellationToken = default);
+    Task RevokeLastAsync(ParsedDocument document, int adminUserId, CancellationToken cancellationToken = default);
 }
 
 public sealed class DocumentSignatureService : IDocumentSignatureService
 {
     private readonly AppDbContext _db;
     private readonly IDocumentAccessService _access;
+    private readonly INotificationService _notifications;
 
-    public DocumentSignatureService(AppDbContext db, IDocumentAccessService access)
+    public DocumentSignatureService(AppDbContext db, IDocumentAccessService access, INotificationService notifications)
     {
         _db = db;
         _access = access;
+        _notifications = notifications;
     }
 
     public string GetCanonicalText(ParsedDocument document) =>
@@ -123,7 +126,43 @@ public sealed class DocumentSignatureService : IDocumentSignatureService
             CreatedAt = DateTime.UtcNow,
         });
 
+        if (document.OwnerId.HasValue && document.OwnerId != signer.Id)
+        {
+            await _notifications.NotifyUserAsync(
+                document.OwnerId.Value,
+                "Документ подписан",
+                $"Документ «{document.Title ?? document.FileName}» подписан пользователем {signer.Email}.",
+                document.Id,
+                cancellationToken);
+        }
+
         return signature;
+    }
+
+    public async Task RevokeLastAsync(ParsedDocument document, int adminUserId, CancellationToken cancellationToken = default)
+    {
+        if (document.WorkflowStatus != DocumentWorkflowStatuses.Signed)
+            throw new InvalidOperationException("Отменить подпись можно только у подписанного документа.");
+
+        var last = await _db.DocumentSignatures
+            .Where(s => s.DocumentId == document.Id)
+            .OrderByDescending(s => s.SignedAt)
+            .FirstOrDefaultAsync(cancellationToken);
+        if (last == null)
+            throw new InvalidOperationException("Подписей не найдено.");
+
+        _db.DocumentSignatures.Remove(last);
+        document.WorkflowStatus = DocumentWorkflowStatuses.Approved;
+        document.WorkflowCompletedAt = null;
+
+        _db.DocumentWorkflowHistory.Add(new DocumentWorkflowHistory
+        {
+            DocumentId = document.Id,
+            UserId = adminUserId,
+            Action = WorkflowActions.SignatureRevoked,
+            Comment = $"Отменена подпись {last.SignerEmailSnapshot}",
+            CreatedAt = DateTime.UtcNow,
+        });
     }
 
     public async Task<IReadOnlyList<DocumentSignature>> GetSignaturesAsync(

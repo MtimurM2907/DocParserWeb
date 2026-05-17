@@ -32,11 +32,11 @@ export function AdminAuditView({ token }: Props) {
     <section className="office-admin office-audit">
       <div className="office-admin-header">
         <h2>Журнал действий (все пользователи)</h2>
-        <button type="button" className="btn-secondary" onClick={() => void load()} disabled={loading}>
+        <button type="button" className="btn-secondary btn-sm" onClick={() => void load()} disabled={loading}>
           {loading ? '…' : 'Обновить'}
         </button>
       </div>
-      {error && <p className="office-card-error">{error}</p>}
+      {error && <div className="admin-alert admin-alert--error">{error}</div>}
       {entries.length === 0 && !loading ? (
         <p className="registry-meta">Записей нет.</p>
       ) : (

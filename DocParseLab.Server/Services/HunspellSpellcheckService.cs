@@ -6,9 +6,7 @@ namespace DocParseLab.Server.Services;
 
 public sealed class HunspellSpellcheckService : ISpellcheckService
 {
-    // Сервис singleton: держим загруженный словарь в памяти.
-    private readonly Lazy<WordList> _ruWordList;
-    private readonly ILogger<HunspellSpellcheckService> _logger;
+    private readonly RussianHunspellDictionary _dictionary;
 
     // В PDF/OCR часто встречаются "невидимые" разделители (soft hyphen / zero-width / BOM),
     // а также смешение латиницы и кириллицы (a/e/o/c/p/x и т.п.). Мы включаем невидимые
@@ -18,32 +16,9 @@ public sealed class HunspellSpellcheckService : ISpellcheckService
         RegexOptions.Compiled);
     private static readonly Regex CyrillicWordRegex = new(@"^[\p{IsCyrillic}\-]+$", RegexOptions.Compiled);
 
-    public HunspellSpellcheckService(IWebHostEnvironment env, ILogger<HunspellSpellcheckService> logger)
+    public HunspellSpellcheckService(RussianHunspellDictionary dictionary)
     {
-        _logger = logger;
-        _ruWordList = new Lazy<WordList>(() =>
-        {
-            var affPath = Path.Combine(env.ContentRootPath, "Resources", "Hunspell", "ru_RU", "ru_RU.aff");
-            var dicPath = Path.Combine(env.ContentRootPath, "Resources", "Hunspell", "ru_RU", "ru_RU.dic");
-
-            if (!File.Exists(affPath) || !File.Exists(dicPath))
-            {
-                throw new FileNotFoundException(
-                    $"Не найдены файлы словаря Hunspell: '{affPath}' и/или '{dicPath}'. Проверьте, что они копируются в Output.");
-            }
-
-            // Важно: сначала AFF (правила), затем DIC (словарь)
-            var wl = WordList.CreateFromFiles(affPath, dicPath);
-
-            // Быстрая самопроверка: если словарь загрузился некорректно, Hunspell помечает почти все слова как ошибки.
-            // Это чаще всего происходит из-за перепутанного порядка файлов или проблем с кодировкой.
-            if (!wl.Check("документ") && !wl.Check("официант"))
-            {
-                _logger.LogWarning("Hunspell ru_RU выглядит некорректно загруженным: тестовые слова не распознаны.");
-            }
-
-            return wl;
-        });
+        _dictionary = dictionary;
     }
 
     public Task<SpellcheckResponse> CheckAsync(SpellcheckRequest request, CancellationToken cancellationToken = default)
@@ -81,7 +56,7 @@ public sealed class HunspellSpellcheckService : ISpellcheckService
             throw new InvalidOperationException("Слишком большой текст для проверки. Максимум: 500000 символов.");
         }
 
-        var wordList = _ruWordList.Value;
+        var wordList = _dictionary.WordList;
 
         foreach (Match match in WordRegex.Matches(text))
         {
@@ -95,9 +70,22 @@ public sealed class HunspellSpellcheckService : ISpellcheckService
             var raw = match.Value;
             if (raw.Length < 2) continue;
 
+            // Латинские «ux», «mo» и т.п. в русском тексте — ошибка OCR, показываем исходное слово и кириллическую замену.
+            if (RussianSpellcheckHomoglyphs.TryContextualLatinOcrReplacement(raw, text, match.Index) is { } ocrFix
+                && !string.Equals(raw, ocrFix, StringComparison.OrdinalIgnoreCase))
+            {
+                result.Mistakes.Add(new SpellcheckMistake
+                {
+                    Word = raw,
+                    Start = match.Index,
+                    Length = match.Length,
+                    Suggestions = new List<string> { ocrFix },
+                });
+                continue;
+            }
+
             var word = RussianSpellcheckHomoglyphs.NormalizeTokenForRuHunspell(raw, text, match.Index);
             if (word.Length < 2) continue;
-
             // Не ругаемся на "слова" с цифрами и т.п.
             bool hasDigit = false;
             for (int i = 0; i < word.Length; i++)
@@ -110,45 +98,45 @@ public sealed class HunspellSpellcheckService : ISpellcheckService
             }
             if (hasDigit) continue;
 
-            // Hunspell чувствителен к регистру; для русского нормализуем первый символ.
-            // (При этом полностью lower может ухудшать подсказки для аббревиатур.)
-            if (!wordList.Check(word))
+            if (IsCorrectRussianWord(wordList, word))
             {
-                // Попробуем ещё lower-case вариант
-                var lower = word.ToLowerInvariant();
-                if (lower != word && wordList.Check(lower))
-                {
-                    continue;
-                }
-
-                // Для подсказок лучше пробовать несколько вариантов регистра:
-                // - исходное слово
-                // - lower (часто даёт лучшие результаты для ALL CAPS)
-                // - Capitalized
-                var suggestions = wordList.Suggest(word)
-                    .Concat(wordList.Suggest(lower))
-                    .Concat(wordList.Suggest(Capitalize(lower)))
-                    .Where(s => !string.IsNullOrWhiteSpace(s))
-                    .Distinct(StringComparer.OrdinalIgnoreCase)
-                    .Take(maxSuggestions)
-                    .ToList();
-
-                // Если слово полностью кириллическое, но Hunspell не дал ни одной подсказки,
-                // это часто артефакт словаря/морфологии, а не реальная орфографическая ошибка.
-                // Чтобы не засыпать UI ложными срабатываниями, такие токены пропускаем.
-                if (suggestions.Count == 0 && LooksLikePlainCyrillicWord(word))
-                {
-                    continue;
-                }
-
-                result.Mistakes.Add(new SpellcheckMistake
-                {
-                    Word = word,
-                    Start = match.Index,
-                    Length = match.Length,
-                    Suggestions = suggestions
-                });
+                continue;
             }
+
+            // Короткие кириллические слова — почти всегда предлоги/союзы; Hunspell даёт ложные срабатывания.
+            if (word.Length <= 3 && CyrillicWordRegex.IsMatch(word))
+            {
+                continue;
+            }
+
+            var lower = word.ToLowerInvariant();
+            var suggestions = CollectSuggestions(wordList, word, lower, maxSuggestions);
+
+            // Подсказка отличается только регистром — не ошибка («За» ↔ «за»).
+            if (suggestions.Any(s => string.Equals(s, word, StringComparison.OrdinalIgnoreCase)))
+            {
+                continue;
+            }
+
+            // Короткие кириллические токены без осмысленных подсказок — ложное срабатывание словаря.
+            if (suggestions.Count == 0 && LooksLikePlainCyrillicWord(word))
+            {
+                continue;
+            }
+
+            // Слитное написание («спецпредложений» → «спец предложений») — не ошибка.
+            if (IsCompoundWordFalsePositive(wordList, word, suggestions))
+            {
+                continue;
+            }
+
+            result.Mistakes.Add(new SpellcheckMistake
+            {
+                Word = word,
+                Start = match.Index,
+                Length = match.Length,
+                Suggestions = suggestions
+            });
         }
 
         return result;
@@ -167,11 +155,94 @@ public sealed class HunspellSpellcheckService : ISpellcheckService
         return char.ToUpperInvariant(value[0]) + value[1..];
     }
 
+    private static bool IsCorrectRussianWord(WordList wordList, string word)
+    {
+        if (RussianSpellcheckLexicon.IsKnown(word))
+        {
+            return true;
+        }
+
+        if (wordList.Check(word))
+        {
+            return true;
+        }
+
+        var lower = word.ToLowerInvariant();
+        if (lower != word && wordList.Check(lower))
+        {
+            return true;
+        }
+
+        var capitalized = Capitalize(lower);
+        if (capitalized != word && wordList.Check(capitalized))
+        {
+            return true;
+        }
+
+        if (word.Length <= 5)
+        {
+            var upper = word.ToUpperInvariant();
+            if (upper != word && wordList.Check(upper))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static List<string> CollectSuggestions(WordList wordList, string word, string lower, int maxSuggestions) =>
+        wordList.Suggest(word)
+            .Concat(wordList.Suggest(lower))
+            .Concat(wordList.Suggest(Capitalize(lower)))
+            .Where(s => !string.IsNullOrWhiteSpace(s))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Take(maxSuggestions)
+            .ToList();
+
     private static bool LooksLikePlainCyrillicWord(string word)
     {
         if (string.IsNullOrWhiteSpace(word)) return false;
-        if (word.Length < 3) return false;
+        if (word.Length < 2) return false;
         return CyrillicWordRegex.IsMatch(word);
+    }
+
+    private static bool IsCompoundWordFalsePositive(WordList wordList, string word, IReadOnlyList<string> suggestions)
+    {
+        if (string.IsNullOrWhiteSpace(word)) return false;
+
+        foreach (var suggestion in suggestions)
+        {
+            if (string.IsNullOrWhiteSpace(suggestion)) continue;
+            var merged = suggestion.Replace(" ", "", StringComparison.Ordinal)
+                .Replace("-", "", StringComparison.Ordinal);
+            if (merged.Equals(word, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        ReadOnlySpan<string> prefixes =
+        [
+            "спец", "меж", "супер", "мини", "авто", "вне", "внутр", "гос", "общ", "недо", "пере", "под", "над", "пред",
+        ];
+
+        foreach (var prefix in prefixes)
+        {
+            if (!word.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) || word.Length <= prefix.Length + 3)
+            {
+                continue;
+            }
+
+            var stem = word[prefix.Length..];
+            var lowerStem = stem.ToLowerInvariant();
+            if (wordList.Check(stem) || wordList.Check(lowerStem) || wordList.Check(Capitalize(lowerStem)))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 }
 

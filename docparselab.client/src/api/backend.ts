@@ -5,11 +5,18 @@ import type {
   ChecklistValidateResult,
   ExtractedEntities,
   ParsedDocument,
-  RewriteResponse,
   SpellcheckResponse,
 } from '../types/api';
 import type { UserBrief } from '../types/office';
 import { authHeaders, readResponseError } from '../lib/http';
+import {
+  createServerWaitProgress,
+  type ParseProgress,
+  type ParseProgressCallback,
+  type ParseUploadProgressController,
+} from '../lib/parseUploadProgress';
+
+export type { ParseProgress, ParseProgressCallback, ParseUploadProgressController };
 
 const jsonContent = { 'Content-Type': 'application/json' };
 
@@ -27,22 +34,80 @@ function parseImportQuery(opts?: ParseImportOptions): string {
   return s ? `?${s}` : '';
 }
 
+function postFormWithProgress(
+  url: string,
+  formData: FormData,
+  token: string,
+  onProgress?: ParseProgressCallback,
+  progressTracker?: ParseUploadProgressController,
+): Promise<ParsedDocument> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    const progress = progressTracker ?? createServerWaitProgress(onProgress);
+    let serverPhase = false;
+
+    const fail = (message: string) => {
+      progress.stop();
+      reject(new Error(message));
+    };
+
+    xhr.upload.addEventListener('progress', (e) => {
+      if (e.lengthComputable && e.total > 0) {
+        progress.uploadPercent(e.loaded / e.total);
+      } else {
+        progress.uploadIndeterminate();
+      }
+    });
+
+    xhr.upload.addEventListener('load', () => {
+      serverPhase = true;
+      progress.startServerProcessing();
+    });
+
+    xhr.addEventListener('readystatechange', () => {
+      if (xhr.readyState === XMLHttpRequest.HEADERS_RECEIVED && serverPhase) {
+        progress.serverAlmostDone('Сохранение и подготовка результата…');
+      }
+      if (xhr.readyState !== XMLHttpRequest.DONE) return;
+
+      if (xhr.status >= 200 && xhr.status < 300) {
+        progress.complete();
+        try {
+          resolve(JSON.parse(xhr.responseText) as ParsedDocument);
+        } catch {
+          fail('Некорректный ответ сервера');
+        }
+        return;
+      }
+
+      const errText = xhr.responseText?.trim();
+      fail(errText || 'Ошибка при загрузке файла');
+    });
+
+    xhr.addEventListener('error', () => fail('Сетевая ошибка при загрузке'));
+    xhr.addEventListener('abort', () => fail('Загрузка отменена'));
+
+    xhr.open('POST', url);
+    const headers = authHeaders(token) as Record<string, string>;
+    if (headers.Authorization) {
+      xhr.setRequestHeader('Authorization', headers.Authorization);
+    }
+    progress.preparing();
+    xhr.send(formData);
+  });
+}
+
 export async function parseDocument(
   file: File,
   token: string,
   importOpts?: ParseImportOptions,
+  onProgress?: ParseProgressCallback,
+  progressTracker?: ParseUploadProgressController,
 ): Promise<ParsedDocument> {
   const formData = new FormData();
   formData.append('file', file);
-  const response = await fetch(`/api/pdf/parse${parseImportQuery(importOpts)}`, {
-    method: 'POST',
-    body: formData,
-    headers: authHeaders(token),
-  });
-  if (!response.ok) {
-    throw new Error(await readResponseError(response, 'Ошибка при загрузке файла'));
-  }
-  return response.json() as Promise<ParsedDocument>;
+  const url = `/api/pdf/parse${parseImportQuery(importOpts)}`;
+  return postFormWithProgress(url, formData, token, onProgress, progressTracker);
 }
 
 export async function parseBatch(
@@ -50,6 +115,7 @@ export async function parseBatch(
   token: string,
   importOpts?: ParseImportOptions,
   batchApiKey?: string | null,
+  onProgress?: ParseProgressCallback,
 ): Promise<BatchParseResponse> {
   const formData = new FormData();
   for (const f of files) {
@@ -61,19 +127,65 @@ export async function parseBatch(
   if (importOpts?.dataClassification?.trim()) {
     formData.append('dataClassification', importOpts.dataClassification.trim());
   }
-  const headers = new Headers(authHeaders(token) as HeadersInit);
-  if (batchApiKey?.trim()) {
-    headers.set('X-Enterprise-Batch-Key', batchApiKey.trim());
-  }
-  const response = await fetch('/api/enterprise/parse-batch', {
-    method: 'POST',
-    body: formData,
-    headers,
+
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    const progress = createServerWaitProgress(onProgress, {
+      uploadMessage: `Загрузка пакета (${files.length} файлов)…`,
+      prepareMessage: 'Подготовка пакета…',
+    });
+    let serverPhase = false;
+
+    const fail = (message: string) => {
+      progress.stop();
+      reject(new Error(message));
+    };
+
+    xhr.upload.addEventListener('progress', (e) => {
+      if (e.lengthComputable && e.total > 0) {
+        progress.uploadPercent(e.loaded / e.total);
+      } else {
+        progress.uploadIndeterminate();
+      }
+    });
+
+    xhr.upload.addEventListener('load', () => {
+      serverPhase = true;
+      progress.startServerProcessing();
+    });
+
+    xhr.addEventListener('readystatechange', () => {
+      if (xhr.readyState === XMLHttpRequest.HEADERS_RECEIVED && serverPhase) {
+        progress.serverAlmostDone('Формирование результата…');
+      }
+      if (xhr.readyState !== XMLHttpRequest.DONE) return;
+
+      if (xhr.status >= 200 && xhr.status < 300) {
+        progress.complete();
+        try {
+          resolve(JSON.parse(xhr.responseText) as BatchParseResponse);
+        } catch {
+          fail('Некорректный ответ сервера');
+        }
+        return;
+      }
+      const errText = xhr.responseText?.trim();
+      fail(errText || 'Ошибка пакетной загрузки');
+    });
+
+    xhr.addEventListener('error', () => fail('Сетевая ошибка при пакетной загрузке'));
+
+    xhr.open('POST', '/api/enterprise/parse-batch');
+    const headers = authHeaders(token) as Record<string, string>;
+    if (headers.Authorization) {
+      xhr.setRequestHeader('Authorization', headers.Authorization);
+    }
+    if (batchApiKey?.trim()) {
+      xhr.setRequestHeader('X-Enterprise-Batch-Key', batchApiKey.trim());
+    }
+    progress.preparing();
+    xhr.send(formData);
   });
-  if (!response.ok) {
-    throw new Error(await readResponseError(response, 'Ошибка пакетной загрузки'));
-  }
-  return response.json() as Promise<BatchParseResponse>;
 }
 
 export async function fetchAuditLog(
@@ -89,36 +201,6 @@ export async function fetchAuditLog(
     throw new Error(await readResponseError(response, 'Не удалось загрузить журнал'));
   }
   return response.json() as Promise<AuditLogEntry[]>;
-}
-
-export type RewriteTextParams = {
-  text: string;
-  mode?: string;
-  tone?: string;
-  length?: string;
-  documentId?: number;
-  token: string;
-};
-
-export async function rewriteText(params: RewriteTextParams): Promise<RewriteResponse> {
-  const body: Record<string, unknown> = {
-    text: params.text,
-    mode: params.mode ?? 'Более формально',
-    tone: params.tone ?? 'нейтральный',
-    length: params.length ?? 'сопоставимая с оригиналом',
-  };
-  if (params.documentId != null) {
-    body.documentId = params.documentId;
-  }
-  const response = await fetch('/api/ai/rewrite', {
-    method: 'POST',
-    headers: { ...jsonContent, ...authHeaders(params.token) },
-    body: JSON.stringify(body),
-  });
-  if (!response.ok) {
-    throw new Error(await readResponseError(response, 'Не удалось переписать текст'));
-  }
-  return response.json() as Promise<RewriteResponse>;
 }
 
 export async function fetchDocumentEntities(token: string, docId: number): Promise<ExtractedEntities> {
@@ -184,9 +266,9 @@ export async function authBootstrap(email: string, password: string): Promise<Au
 export type CreateUserParams = {
   email: string;
   password: string;
+  displayName: string;
   role: string;
-  departmentId?: number | null;
-  displayName?: string | null;
+  departmentId: number;
 };
 
 export async function createUserAccount(token: string, params: CreateUserParams): Promise<UserBrief> {
@@ -218,6 +300,67 @@ export async function shareDocument(token: string, documentId: number, targetEma
   if (!response.ok) {
     throw new Error(await readResponseError(response, 'Ошибка при отправке документа'));
   }
+}
+
+export async function fetchDocumentShares(token: string, documentId: number) {
+  const response = await fetch(`/api/pdf/${documentId}/shares`, { headers: authHeaders(token) });
+  if (!response.ok) throw new Error(await readResponseError(response, 'Не удалось загрузить список доступа'));
+  return response.json() as Promise<import('../types/office').DocumentShareItem[]>;
+}
+
+export async function revokeDocumentShare(token: string, documentId: number, shareId: number) {
+  const response = await fetch(`/api/pdf/${documentId}/shares/${shareId}`, {
+    method: 'DELETE',
+    headers: authHeaders(token),
+  });
+  if (!response.ok) throw new Error(await readResponseError(response, 'Не удалось отозвать доступ'));
+}
+
+export function originalDocumentUrl(documentId: number) {
+  return `/api/pdf/${documentId}/original`;
+}
+
+export function pagePreviewUrl(documentId: number, page: number) {
+  return `/api/pdf/${documentId}/pages/${page}/preview`;
+}
+
+export async function fetchDocumentPageCount(token: string, documentId: number): Promise<number> {
+  const response = await fetch(`/api/pdf/${documentId}/page-count`, { headers: authHeaders(token) });
+  if (!response.ok) {
+    throw new Error(await readResponseError(response, 'Не удалось получить число страниц'));
+  }
+  const data = (await response.json()) as { pageCount: number };
+  return Math.max(1, data.pageCount ?? 1);
+}
+
+export async function fetchPagePreviewBlob(
+  token: string,
+  documentId: number,
+  page: number,
+): Promise<Blob> {
+  const response = await fetch(pagePreviewUrl(documentId, page), { headers: authHeaders(token) });
+  if (!response.ok) {
+    throw new Error(await readResponseError(response, 'Не удалось загрузить превью страницы'));
+  }
+  return response.blob();
+}
+
+export async function downloadOriginalDocument(
+  token: string,
+  docId: number,
+  fileName: string,
+): Promise<void> {
+  const response = await fetch(originalDocumentUrl(docId), { headers: authHeaders(token) });
+  if (!response.ok) {
+    throw new Error(await readResponseError(response, 'Не удалось скачать оригинал'));
+  }
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = fileName;
+  a.click();
+  URL.revokeObjectURL(url);
 }
 
 export async function sendDocumentByEmail(
@@ -256,6 +399,28 @@ export async function saveDocumentText(token: string, docId: number, text: strin
   return response.json() as Promise<ParsedDocument>;
 }
 
+export async function fetchGigaChatStatus(): Promise<{ configured: boolean }> {
+  const response = await fetch('/api/ai/status');
+  if (!response.ok) {
+    throw new Error(await readResponseError(response, 'Не удалось проверить GigaChat'));
+  }
+  return response.json() as Promise<{ configured: boolean }>;
+}
+
+export async function regenerateDocumentSummary(
+  token: string,
+  docId: number,
+): Promise<{ aiSummary: string; source: string }> {
+  const response = await fetch(`/api/ai/summarize/${docId}`, {
+    method: 'POST',
+    headers: authHeaders(token),
+  });
+  if (!response.ok) {
+    throw new Error(await readResponseError(response, 'Не удалось сформировать описание'));
+  }
+  return response.json() as Promise<{ aiSummary: string; source: string }>;
+}
+
 export async function runSpellcheck(
   text: string,
   token: string,
@@ -291,7 +456,12 @@ export async function deleteDocument(token: string, docId: number): Promise<void
   }
 }
 
-export async function exportDocument(token: string, docId: number, fileName: string, format: 'docx' | 'pdf'): Promise<void> {
+export async function exportDocument(
+  token: string,
+  docId: number,
+  fileName: string,
+  format: 'docx' | 'pdf' | 'signed-pdf',
+): Promise<void> {
   const response = await fetch(`/api/pdf/${docId}/export?format=${format}`, { headers: authHeaders(token) });
   if (!response.ok) {
     throw new Error(await readResponseError(response, 'Ошибка экспорта'));
@@ -300,7 +470,7 @@ export async function exportDocument(token: string, docId: number, fileName: str
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = `${fileName}.${format}`;
+  a.download = format === 'signed-pdf' ? `${fileName}.pdf` : `${fileName}.${format}`;
   a.click();
   URL.revokeObjectURL(url);
 }

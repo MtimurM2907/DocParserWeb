@@ -1,6 +1,7 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { ParsedDocument } from '../types/api';
-import { shareDocument } from '../api/backend';
+import { fetchDocumentShares, revokeDocumentShare, shareDocument } from '../api/backend';
+import type { DocumentShareItem } from '../types/office';
 
 type Props = {
   token: string;
@@ -15,6 +16,12 @@ export function DocumentSharePanel({ token, document, currentUserId, onShared, o
   const [email, setEmail] = useState('');
   const [busy, setBusy] = useState(false);
   const [success, setSuccess] = useState<string | null>(null);
+  const [shares, setShares] = useState<DocumentShareItem[]>([]);
+
+  useEffect(() => {
+    if (!expanded) return;
+    void fetchDocumentShares(token, document.id).then(setShares).catch(() => setShares([]));
+  }, [expanded, token, document.id, document.shareCount]);
 
   const isOwner = document.ownerId === currentUserId;
   if (!isOwner) return null;
@@ -70,10 +77,32 @@ export function DocumentSharePanel({ token, document, currentUserId, onShared, o
               onKeyDown={(e) => e.key === 'Enter' && void handleShare()}
             />
           </label>
-          <button type="button" className="office-sidebar-btn" disabled={busy} onClick={() => void handleShare()}>
+          <button type="button" className="btn-primary office-sidebar-btn" disabled={busy} onClick={() => void handleShare()}>
             {busy ? 'Отправка…' : 'Предоставить доступ'}
           </button>
           {success && <p className="share-success">{success}</p>}
+          {shares.length > 0 && (
+            <ul className="share-list">
+              {shares.map((s) => (
+                <li key={s.shareId} className="share-list__item">
+                  <span>{s.toUserEmail}</span>
+                  <button
+                    type="button"
+                    className="btn-reject"
+                    disabled={busy}
+                    onClick={() => {
+                      void revokeDocumentShare(token, document.id, s.shareId).then(() => {
+                        setShares((prev) => prev.filter((x) => x.shareId !== s.shareId));
+                        onShared();
+                      });
+                    }}
+                  >
+                    Отозвать
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
         </div>
       )}
     </div>

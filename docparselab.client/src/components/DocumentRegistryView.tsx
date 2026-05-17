@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { Department, DocumentRegistryItem, MainView } from '../types/office';
 import { DOCUMENT_TYPE_LABELS, WORKFLOW_STATUS_LABELS } from '../types/office';
 import { fetchDepartments, fetchRegistry } from '../api/office';
+import { AppSelect, optionsFromLabels } from './AppSelect';
 
 type Props = {
   token: string;
@@ -18,6 +19,22 @@ export function DocumentRegistryView({ token, onOpenDocument, onSwitchView }: Pr
   const [documentType, setDocumentType] = useState('');
   const [departmentId, setDepartmentId] = useState('');
   const [search, setSearch] = useState('');
+
+  const statusOptions = useMemo(
+    () => optionsFromLabels(WORKFLOW_STATUS_LABELS, { value: '', label: 'Все статусы' }),
+    [],
+  );
+  const typeOptions = useMemo(
+    () => optionsFromLabels(DOCUMENT_TYPE_LABELS, { value: '', label: 'Все типы' }),
+    [],
+  );
+  const departmentOptions = useMemo(
+    () => [
+      { value: '', label: 'Все подразделения' },
+      ...departments.map((d) => ({ value: String(d.id), label: d.name })),
+    ],
+    [departments],
+  );
   const [mineOnly, setMineOnly] = useState(false);
   const [page, setPage] = useState(0);
   const pageSize = 25;
@@ -67,42 +84,47 @@ export function DocumentRegistryView({ token, onOpenDocument, onSwitchView }: Pr
       <div className="registry-filters">
         <input
           type="search"
+          className="registry-filters__search"
           placeholder="Поиск по названию, файлу, тегам…"
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           onKeyDown={(e) => e.key === 'Enter' && void load()}
         />
-        <select value={status} onChange={(e) => setStatus(e.target.value)}>
-          <option value="">Все статусы</option>
-          {Object.entries(WORKFLOW_STATUS_LABELS).map(([k, v]) => (
-            <option key={k} value={k}>
-              {v}
-            </option>
-          ))}
-        </select>
-        <select value={documentType} onChange={(e) => setDocumentType(e.target.value)}>
-          <option value="">Все типы</option>
-          {Object.entries(DOCUMENT_TYPE_LABELS).map(([k, v]) => (
-            <option key={k} value={k}>
-              {v}
-            </option>
-          ))}
-        </select>
-        <select value={departmentId} onChange={(e) => setDepartmentId(e.target.value)}>
-          <option value="">Все подразделения</option>
-          {departments.map((d) => (
-            <option key={d.id} value={d.id}>
-              {d.name}
-            </option>
-          ))}
-        </select>
-        <label className="registry-mine">
-          <input type="checkbox" checked={mineOnly} onChange={(e) => setMineOnly(e.target.checked)} />
-          Только мои
-        </label>
-        <button type="button" onClick={() => void load()} disabled={loading}>
-          {loading ? '…' : 'Найти'}
-        </button>
+        <div className="registry-filters__controls">
+          <AppSelect
+            className="app-select--compact registry-filters__status"
+            value={status}
+            onChange={setStatus}
+            options={statusOptions}
+            aria-label="Статус"
+          />
+          <AppSelect
+            className="app-select--compact registry-filters__type"
+            value={documentType}
+            onChange={setDocumentType}
+            options={typeOptions}
+            aria-label="Тип документа"
+          />
+          <AppSelect
+            className="app-select--compact registry-filters__dept"
+            value={departmentId}
+            onChange={setDepartmentId}
+            options={departmentOptions}
+            aria-label="Подразделение"
+          />
+          <label className="registry-mine">
+            <input type="checkbox" checked={mineOnly} onChange={(e) => setMineOnly(e.target.checked)} />
+            Только мои
+          </label>
+          <button
+            type="button"
+            className="btn-primary btn-sm registry-filters__submit"
+            onClick={() => void load()}
+            disabled={loading}
+          >
+            {loading ? '…' : 'Найти'}
+          </button>
+        </div>
       </div>
       <p className="registry-meta">
         Найдено: {total}

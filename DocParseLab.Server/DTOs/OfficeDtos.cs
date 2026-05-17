@@ -77,7 +77,9 @@ public sealed class UpdateDocumentMetadataRequest
 public sealed class SubmitForApprovalRequest
 {
     public int ApproverUserId { get; set; }
+    public List<int>? ApproverUserIds { get; set; }
     public string? Comment { get; set; }
+    public DateTime? ApprovalDueAt { get; set; }
 }
 
 public sealed class WorkflowDecisionRequest
@@ -128,16 +130,13 @@ public sealed class ApprovalTaskResponse
     public string? WorkflowComment { get; set; }
 }
 
-public sealed class UpdateUserProfileRequest
+public sealed class UpdateUserRequest
 {
-    public string? DisplayName { get; set; }
-    public int? DepartmentId { get; set; }
-}
-
-public sealed class SetUserRoleRequest
-{
+    public string Email { get; set; } = string.Empty;
+    public string DisplayName { get; set; } = string.Empty;
     public string Role { get; set; } = string.Empty;
-    public int? DepartmentId { get; set; }
+    public int DepartmentId { get; set; }
+    public string? Password { get; set; }
 }
 
 public sealed class SignDocumentRequest
@@ -156,6 +155,9 @@ public sealed class DocumentSignatureResponse
     public string SignerRole { get; set; } = string.Empty;
     public string? Comment { get; set; }
     public string SignatureKind { get; set; } = string.Empty;
+    public string? CertificateSubject { get; set; }
+    public string? CertificateThumbprint { get; set; }
+    public bool? ExternalCryptoVerified { get; set; }
 }
 
 public sealed class SignatureVerificationResponse
@@ -166,4 +168,113 @@ public sealed class SignatureVerificationResponse
     public string? LastSignatureHashSha256 { get; set; }
     public DateTime? LastSignedAt { get; set; }
     public string? LastSignerEmail { get; set; }
+}
+
+/// <summary>Данные для подписи УКЭП через КриптоПро (отсоединённая CMS над каноническим текстом).</summary>
+public sealed class DocumentSigningPayloadResponse
+{
+    public string TextHashSha256 { get; set; } = string.Empty;
+    public string ContentBase64 { get; set; } = string.Empty;
+    public int ContentByteLength { get; set; }
+}
+
+public sealed class CreateDepartmentRequest
+{
+    public string Name { get; set; } = string.Empty;
+}
+
+public sealed class BulkArchiveRequest
+{
+    public List<int> DocumentIds { get; set; } = new();
+}
+
+public sealed class BulkArchiveResponse
+{
+    public int ArchivedCount { get; set; }
+}
+
+public sealed class DocumentCommentResponse
+{
+    public int Id { get; set; }
+    public string Text { get; set; } = string.Empty;
+    public DateTime CreatedAt { get; set; }
+    public string? UserEmail { get; set; }
+    public string? UserDisplayName { get; set; }
+}
+
+public sealed class AddDocumentCommentRequest
+{
+    public string Text { get; set; } = string.Empty;
+}
+
+public sealed class UserNotificationResponse
+{
+    public int Id { get; set; }
+    public string Title { get; set; } = string.Empty;
+    public string Body { get; set; } = string.Empty;
+    public int? DocumentId { get; set; }
+    public bool IsRead { get; set; }
+    public DateTime CreatedAt { get; set; }
+}
+
+public sealed class DocumentAccessLogResponse
+{
+    public int Id { get; set; }
+    public string Action { get; set; } = string.Empty;
+    public DateTime CreatedAt { get; set; }
+    public string? UserEmail { get; set; }
+    public string? IpAddress { get; set; }
+}
+
+public sealed class VersionDiffResponse
+{
+    public int FromVersionId { get; set; }
+    public int ToVersionId { get; set; }
+    public List<TextDiffLineResponse> Lines { get; set; } = new();
+}
+
+public sealed class TextDiffLineResponse
+{
+    public string Kind { get; set; } = string.Empty;
+    public string Text { get; set; } = string.Empty;
+}
+
+public sealed class ApprovalStepResponse
+{
+    public int StepOrder { get; set; }
+    public int ApproverUserId { get; set; }
+    public string? ApproverEmail { get; set; }
+    public string Status { get; set; } = string.Empty;
+    public string? Comment { get; set; }
+    public DateTime? ActedAt { get; set; }
+}
+
+public sealed class DocumentShareItemResponse
+{
+    public int ShareId { get; set; }
+    public int ToUserId { get; set; }
+    public string ToUserEmail { get; set; } = string.Empty;
+    public DateTime SharedAt { get; set; }
+}
+
+public sealed class ChangePasswordRequest
+{
+    public string CurrentPassword { get; set; } = string.Empty;
+    public string NewPassword { get; set; } = string.Empty;
+}
+
+public sealed class DocumentEditLockStatusResponse
+{
+    public bool IsLocked { get; set; }
+    public bool CanEdit { get; set; }
+    public int? LockedByUserId { get; set; }
+    public string? LockedByEmail { get; set; }
+    public DateTime? ExpiresAt { get; set; }
+}
+
+public sealed class ExternalSignRequest
+{
+    public string? CertificateSubject { get; set; }
+    public string? CertificateThumbprint { get; set; }
+    public string? Comment { get; set; }
 }

@@ -1,7 +1,8 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type { ParsedDocument } from '../types/api';
 import type { UserBrief, WorkflowHistoryItem } from '../types/office';
 import { WORKFLOW_STATUS_LABELS } from '../types/office';
+import { AppMultiSelect } from './AppMultiSelect';
 import {
   approveDocument,
   archiveDocument,
@@ -21,8 +22,13 @@ type Props = {
 
 export function OfficeWorkflowPanel({ token, document, onUpdated, onError }: Props) {
   const [users, setUsers] = useState<UserBrief[]>([]);
-  const [approverId, setApproverId] = useState('');
+  const [approverIds, setApproverIds] = useState<number[]>([]);
   const [comment, setComment] = useState('');
+
+  const approverOptions = useMemo(
+    () => users.map((u) => ({ value: String(u.id), label: u.displayName || u.email })),
+    [users],
+  );
   const [rejectComment, setRejectComment] = useState('');
   const [history, setHistory] = useState<WorkflowHistoryItem[]>([]);
   const [busy, setBusy] = useState(false);
@@ -77,15 +83,13 @@ export function OfficeWorkflowPanel({ token, document, onUpdated, onError }: Pro
         {(status === 'Draft' || status === 'Rejected') && (
           <div className="office-workflow-form">
             <label className="parse-field">
-              <span className="parse-field-label">Согласующий</span>
-              <select value={approverId} onChange={(e) => setApproverId(e.target.value)}>
-                <option value="">— выберите —</option>
-                {users.map((u) => (
-                  <option key={u.id} value={u.id}>
-                    {u.displayName || u.email}
-                  </option>
-                ))}
-              </select>
+              <span className="parse-field-label">Согласующие (порядок этапов)</span>
+              <AppMultiSelect
+                values={approverIds.map(String)}
+                onChange={(ids) => setApproverIds(ids.map((id) => parseInt(id, 10)).filter((n) => !Number.isNaN(n)))}
+                options={approverOptions}
+                placeholder="Выберите согласующих"
+              />
             </label>
             <label className="parse-field">
               <span className="parse-field-label">Комментарий (необязательно)</span>
@@ -96,12 +100,11 @@ export function OfficeWorkflowPanel({ token, document, onUpdated, onError }: Pro
               className="btn-primary office-sidebar-btn"
               disabled={busy}
               onClick={() => {
-                const id = parseInt(approverId, 10);
-                if (!id) {
-                  onError('Выберите согласующего');
+                if (approverIds.length === 0) {
+                  onError('Выберите хотя бы одного согласующего');
                   return;
                 }
-                void run(() => submitForApproval(token, document.id, id, comment || undefined));
+                void run(() => submitForApproval(token, document.id, approverIds, comment || undefined));
               }}
             >
               {busy ? 'Отправка…' : 'Отправить на согласование'}

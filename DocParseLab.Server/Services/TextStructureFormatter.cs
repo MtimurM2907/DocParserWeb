@@ -10,7 +10,42 @@ public static class TextStructureFormatter
 
     public static string NormalizeForStorage(string text)
     {
-        var normalized = (text ?? string.Empty)
+        var source = text ?? string.Empty;
+        if (!source.Contains('\f'))
+        {
+            return NormalizePageContent(source);
+        }
+
+        var pages = source.Split('\f', StringSplitOptions.None);
+        for (var i = 0; i < pages.Length; i++)
+        {
+            pages[i] = NormalizePageContent(pages[i]);
+        }
+
+        return string.Join("\f", pages);
+    }
+
+    public static IReadOnlyList<string> SplitParagraphs(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return Array.Empty<string>();
+        }
+
+        if (!text.Contains('\f'))
+        {
+            return SplitParagraphsForPage(text);
+        }
+
+        return text
+            .Split('\f', StringSplitOptions.None)
+            .SelectMany(SplitParagraphsForPage)
+            .ToList();
+    }
+
+    private static string NormalizePageContent(string text)
+    {
+        var normalized = text
             .Replace("\u00A0", " ")
             .Replace("\r\n", "\n")
             .Replace("\r", "\n");
@@ -26,9 +61,9 @@ public static class TextStructureFormatter
         return normalized.Trim();
     }
 
-    public static IReadOnlyList<string> SplitParagraphs(string text)
+    private static IReadOnlyList<string> SplitParagraphsForPage(string text)
     {
-        var normalized = NormalizeForStorage(text);
+        var normalized = NormalizePageContent(text);
         if (string.IsNullOrWhiteSpace(normalized))
         {
             return Array.Empty<string>();

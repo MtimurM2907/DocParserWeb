@@ -90,6 +90,17 @@ export interface DocumentSignature {
   signerRole: string;
   comment?: string | null;
   signatureKind: string;
+  certificateSubject?: string | null;
+  certificateThumbprint?: string | null;
+  externalCryptoVerified?: boolean | null;
+}
+
+export interface DocumentEditLockStatus {
+  isLocked: boolean;
+  canEdit: boolean;
+  lockedByUserId?: number | null;
+  lockedByEmail?: string | null;
+  expiresAt?: string | null;
 }
 
 export interface SignatureVerification {
@@ -99,6 +110,12 @@ export interface SignatureVerification {
   lastSignatureHashSha256?: string | null;
   lastSignedAt?: string | null;
   lastSignerEmail?: string | null;
+}
+
+export interface DocumentSigningPayload {
+  textHashSha256: string;
+  contentBase64: string;
+  contentByteLength: number;
 }
 
 export const WORKFLOW_STATUS_LABELS: Record<string, string> = {
@@ -133,3 +150,42 @@ export const ROLE_LABELS: Record<string, string> = {
   Employee: 'Сотрудник',
   Viewer: 'Только просмотр',
 };
+
+export interface UserNotification {
+  id: number;
+  title: string;
+  body: string;
+  documentId?: number | null;
+  isRead: boolean;
+  createdAt: string;
+}
+
+export interface DocumentComment {
+  id: number;
+  text: string;
+  createdAt: string;
+  userEmail?: string | null;
+  userDisplayName?: string | null;
+}
+
+export interface ApprovalStep {
+  stepOrder: number;
+  approverUserId: number;
+  approverEmail?: string | null;
+  status: string;
+  comment?: string | null;
+  actedAt?: string | null;
+}
+
+export interface VersionDiff {
+  fromVersionId: number;
+  toVersionId: number;
+  lines: { kind: string; text: string }[];
+}
+
+export interface DocumentShareItem {
+  shareId: number;
+  toUserId: number;
+  toUserEmail: string;
+  sharedAt: string;
+}

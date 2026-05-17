@@ -34,6 +34,8 @@ export interface ParsedDocument {
   textIntegrityValid?: boolean;
   lastSignedAt?: string | null;
   lastSignerEmail?: string | null;
+  hasOriginalFile?: boolean;
+  originalPageCount?: number | null;
 }
 
 export interface BatchParseResponse {
@@ -80,11 +82,6 @@ export interface SpellcheckMistake {
   start: number;
   length: number;
   suggestions: string[];
-}
-
-export interface RewriteResponse {
-  rewrittenText: string;
-  modelComment: string;
 }
 
 export interface SpellcheckResponse {

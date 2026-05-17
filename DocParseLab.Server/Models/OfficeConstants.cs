@@ -33,8 +33,10 @@ public static class WorkflowActions
 {
     public const string Submitted = "Submitted";
     public const string Approved = "Approved";
+    public const string StepApproved = "StepApproved";
     public const string Rejected = "Rejected";
     public const string Archived = "Archived";
     public const string ReturnedToDraft = "ReturnedToDraft";
     public const string Signed = "Signed";
+    public const string SignatureRevoked = "SignatureRevoked";
 }

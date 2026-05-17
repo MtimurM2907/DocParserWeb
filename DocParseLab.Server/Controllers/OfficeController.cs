@@ -100,7 +100,9 @@ public sealed class OfficeController : ControllerBase
             q = q.Where(d =>
                 d.FileName.ToLower().Contains(s)
                 || (d.Title != null && d.Title.ToLower().Contains(s))
-                || (d.Tags != null && d.Tags.ToLower().Contains(s)));
+                || (d.Tags != null && d.Tags.ToLower().Contains(s))
+                || d.FullText.ToLower().Contains(s)
+                || (d.EditedText != null && d.EditedText.ToLower().Contains(s)));
         }
 
         var take = Math.Clamp(query.Take, 1, 200);
@@ -193,8 +195,10 @@ public sealed class OfficeController : ControllerBase
     {
         if (!User.TryGetUserId(out var userId))
             return Unauthorized();
-        if (request == null || request.ApproverUserId <= 0)
-            return BadRequest(new ErrorResponse { Message = "Укажите согласующего." });
+        var approverIds = request?.ApproverUserIds?.Where(x => x > 0).Distinct().ToList()
+            ?? (request?.ApproverUserId > 0 ? new List<int> { request.ApproverUserId } : new List<int>());
+        if (approverIds.Count == 0)
+            return BadRequest(new ErrorResponse { Message = "Укажите хотя бы одного согласующего." });
 
         var doc = await LoadDocumentAsync(id, cancellationToken);
         if (doc == null)
@@ -205,7 +209,7 @@ public sealed class OfficeController : ControllerBase
 
         try
         {
-            await _workflow.SubmitAsync(doc, userId, request.ApproverUserId, request.Comment, cancellationToken);
+            await _workflow.SubmitAsync(doc, userId, approverIds, request?.Comment, request?.ApprovalDueAt, cancellationToken);
             await _db.SaveChangesAsync(cancellationToken);
             await _audit.LogAsync("workflow.submit", $"document:{id}", $"approver={request.ApproverUserId}", cancellationToken);
         }
@@ -411,6 +415,41 @@ public sealed class OfficeController : ControllerBase
         });
     }
 
+    [HttpGet("documents/{id:int}/signing-payload")]
+    [ProducesResponseType(typeof(DocumentSigningPayloadResponse), StatusCodes.Status200OK)]
+    public async Task<ActionResult<DocumentSigningPayloadResponse>> GetSigningPayload(
+        int id,
+        CancellationToken cancellationToken)
+    {
+        if (!User.TryGetUserId(out var userId))
+            return Unauthorized();
+
+        var doc = await LoadDocumentAsync(id, cancellationToken);
+        if (doc == null || !await _access.CanReadAsync(userId, doc, cancellationToken))
+            return NotFound();
+
+        if (doc.WorkflowStatus != DocumentWorkflowStatuses.Approved
+            && doc.WorkflowStatus != DocumentWorkflowStatuses.Signed)
+        {
+            return BadRequest(new ErrorResponse { Message = "УКЭП доступна для согласованных или подписанных документов." });
+        }
+
+        if (!await _signatures.CanSignAsync(userId, doc, cancellationToken))
+            return Forbid();
+
+        var canonical = _signatures.GetCanonicalText(doc);
+        if (string.IsNullOrWhiteSpace(canonical))
+            return BadRequest(new ErrorResponse { Message = "В документе нет текста для подписи." });
+
+        var bytes = System.Text.Encoding.UTF8.GetBytes(canonical);
+        return Ok(new DocumentSigningPayloadResponse
+        {
+            TextHashSha256 = _signatures.ComputeTextHash(canonical),
+            ContentBase64 = Convert.ToBase64String(bytes),
+            ContentByteLength = bytes.Length,
+        });
+    }
+
     [HttpGet("documents/{id:int}/versions")]
     [ProducesResponseType(typeof(List<DocumentVersionResponse>), StatusCodes.Status200OK)]
     public async Task<ActionResult<List<DocumentVersionResponse>>> GetVersions(int id, CancellationToken cancellationToken)
@@ -510,11 +549,11 @@ public sealed class OfficeController : ControllerBase
         return Ok(history);
     }
 
-    [HttpPut("users/{userId:int}/role")]
+    [HttpPut("users/{userId:int}")]
     [ProducesResponseType(typeof(UserBriefResponse), StatusCodes.Status200OK)]
-    public async Task<ActionResult<UserBriefResponse>> SetUserRole(
+    public async Task<ActionResult<UserBriefResponse>> UpdateUser(
         int userId,
-        [FromBody] SetUserRoleRequest request,
+        [FromBody] UpdateUserRequest request,
         CancellationToken cancellationToken)
     {
         if (!User.IsAdmin())
@@ -523,13 +562,39 @@ public sealed class OfficeController : ControllerBase
         if (request == null || !UserRoles.All.Contains(request.Role))
             return BadRequest(new ErrorResponse { Message = "Недопустимая роль." });
 
+        if (string.IsNullOrWhiteSpace(request.Email) || string.IsNullOrWhiteSpace(request.DisplayName))
+            return BadRequest(new ErrorResponse { Message = "Укажите email и ФИО (логин)." });
+
+        if (request.DepartmentId <= 0)
+            return BadRequest(new ErrorResponse { Message = "Выберите подразделение." });
+
+        var depExists = await _db.Departments.AnyAsync(d => d.Id == request.DepartmentId, cancellationToken);
+        if (!depExists)
+            return BadRequest(new ErrorResponse { Message = "Подразделение не найдено." });
+
         var target = await _db.Users.Include(u => u.Department).FirstOrDefaultAsync(u => u.Id == userId, cancellationToken);
         if (target == null)
             return NotFound();
 
+        var email = request.Email.Trim().ToLowerInvariant();
+        if (await _db.Users.AnyAsync(u => u.Id != userId && u.Email.ToLower() == email, cancellationToken))
+            return Conflict(new ErrorResponse { Message = "Пользователь с таким email уже существует." });
+
+        if (!string.IsNullOrWhiteSpace(request.Password))
+        {
+            if (request.Password.Length < 6)
+                return BadRequest(new ErrorResponse { Message = "Пароль должен быть не короче 6 символов." });
+            var (hash, salt) = PasswordHasher.HashPassword(request.Password);
+            target.PasswordHash = hash;
+            target.PasswordSalt = salt;
+        }
+
+        target.Email = email;
+        target.DisplayName = request.DisplayName.Trim();
         target.Role = request.Role;
-        target.DepartmentId = request.DepartmentId is > 0 ? request.DepartmentId : null;
+        target.DepartmentId = request.DepartmentId;
         await _db.SaveChangesAsync(cancellationToken);
+        await _db.Entry(target).Reference(u => u.Department).LoadAsync(cancellationToken);
 
         return Ok(new UserBriefResponse
         {
@@ -538,30 +603,104 @@ public sealed class OfficeController : ControllerBase
             DisplayName = target.DisplayName,
             Role = target.Role,
             DepartmentId = target.DepartmentId,
-            DepartmentName = target.Department?.Name
+            DepartmentName = target.Department?.Name,
         });
     }
 
-    [HttpPatch("profile")]
-    [ProducesResponseType(typeof(CurrentUserResponse), StatusCodes.Status200OK)]
-    public async Task<ActionResult<CurrentUserResponse>> UpdateProfile(
-        [FromBody] UpdateUserProfileRequest request,
-        CancellationToken cancellationToken)
+    [HttpDelete("users/{userId:int}")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    public async Task<IActionResult> DeleteUser(int userId, CancellationToken cancellationToken)
     {
-        if (!User.TryGetUserId(out var userId))
+        if (!User.IsAdmin())
+            return Forbid();
+
+        if (!User.TryGetUserId(out var currentUserId))
             return Unauthorized();
 
-        var user = await _db.Users.Include(u => u.Department).FirstOrDefaultAsync(u => u.Id == userId, cancellationToken);
-        if (user == null)
+        if (userId == currentUserId)
+            return BadRequest(new ErrorResponse { Message = "Нельзя удалить свою учётную запись." });
+
+        var target = await _db.Users.FindAsync(new object[] { userId }, cancellationToken);
+        if (target == null)
             return NotFound();
 
-        if (request.DisplayName != null)
-            user.DisplayName = string.IsNullOrWhiteSpace(request.DisplayName) ? null : request.DisplayName.Trim();
-        if (request.DepartmentId.HasValue)
-            user.DepartmentId = request.DepartmentId.Value <= 0 ? null : request.DepartmentId;
+        if (string.Equals(target.Role, UserRoles.Admin, StringComparison.OrdinalIgnoreCase))
+        {
+            var adminCount = await _db.Users.CountAsync(
+                u => u.Role == UserRoles.Admin,
+                cancellationToken);
+            if (adminCount <= 1)
+                return BadRequest(new ErrorResponse { Message = "Нельзя удалить последнего администратора." });
+        }
 
+        var shares = await _db.DocumentShares
+            .Where(s => s.FromUserId == userId || s.ToUserId == userId)
+            .ToListAsync(cancellationToken);
+        _db.DocumentShares.RemoveRange(shares);
+
+        var signatures = await _db.DocumentSignatures
+            .Where(s => s.SignedByUserId == userId)
+            .ToListAsync(cancellationToken);
+        _db.DocumentSignatures.RemoveRange(signatures);
+
+        var approvalSteps = await _db.DocumentApprovalSteps
+            .Where(s => s.ApproverUserId == userId)
+            .ToListAsync(cancellationToken);
+        _db.DocumentApprovalSteps.RemoveRange(approvalSteps);
+
+        var comments = await _db.DocumentComments
+            .Where(c => c.UserId == userId)
+            .ToListAsync(cancellationToken);
+        _db.DocumentComments.RemoveRange(comments);
+
+        var ownedDocs = await _db.ParsedDocuments.Where(d => d.OwnerId == userId).ToListAsync(cancellationToken);
+        foreach (var doc in ownedDocs)
+        {
+            doc.OwnerId = null;
+            if (doc.ResponsibleUserId == userId)
+                doc.ResponsibleUserId = null;
+            if (doc.CurrentApproverUserId == userId)
+            {
+                doc.CurrentApproverUserId = null;
+                if (doc.WorkflowStatus == DocumentWorkflowStatuses.OnApproval)
+                    doc.WorkflowStatus = DocumentWorkflowStatuses.Draft;
+            }
+            if (doc.EditLockedByUserId == userId)
+            {
+                doc.EditLockedByUserId = null;
+                doc.EditLockExpiresAt = null;
+            }
+        }
+
+        var relatedDocs = await _db.ParsedDocuments
+            .Where(d =>
+                d.OwnerId != userId &&
+                (d.ResponsibleUserId == userId ||
+                 d.CurrentApproverUserId == userId ||
+                 d.EditLockedByUserId == userId))
+            .ToListAsync(cancellationToken);
+        foreach (var doc in relatedDocs)
+        {
+            if (doc.ResponsibleUserId == userId)
+                doc.ResponsibleUserId = null;
+            if (doc.CurrentApproverUserId == userId)
+            {
+                doc.CurrentApproverUserId = null;
+                if (doc.WorkflowStatus == DocumentWorkflowStatuses.OnApproval)
+                    doc.WorkflowStatus = DocumentWorkflowStatuses.Draft;
+            }
+            if (doc.EditLockedByUserId == userId)
+            {
+                doc.EditLockedByUserId = null;
+                doc.EditLockExpiresAt = null;
+            }
+        }
+
+        _db.Users.Remove(target);
         await _db.SaveChangesAsync(cancellationToken);
-        return Ok(ToCurrentUser(user));
+        await _audit.LogAsync("admin.user.delete", $"user:{userId}", target.Email, cancellationToken);
+
+        return NoContent();
     }
 
     private async Task<ParsedDocument?> LoadDocumentAsync(int id, CancellationToken cancellationToken) =>
@@ -605,6 +744,9 @@ public sealed class OfficeController : ControllerBase
         SignerRole = s.SignerRoleSnapshot,
         Comment = s.Comment,
         SignatureKind = s.SignatureKind,
+        CertificateSubject = s.CertificateSubject,
+        CertificateThumbprint = s.CertificateThumbprint,
+        ExternalCryptoVerified = s.ExternalCryptoVerified,
     };
 
     private static CurrentUserResponse ToCurrentUser(AppUser user) => new()

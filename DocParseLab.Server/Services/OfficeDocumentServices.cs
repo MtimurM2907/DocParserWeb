@@ -158,59 +158,147 @@ public sealed class DocumentVersionService : IDocumentVersionService
 
 public interface IDocumentWorkflowService
 {
-    Task SubmitAsync(ParsedDocument doc, int authorUserId, int approverUserId, string? comment, CancellationToken cancellationToken = default);
+    Task SubmitAsync(
+        ParsedDocument doc,
+        int authorUserId,
+        IReadOnlyList<int> approverUserIds,
+        string? comment,
+        DateTime? approvalDueAt = null,
+        CancellationToken cancellationToken = default);
     Task ApproveAsync(ParsedDocument doc, int approverUserId, string? comment, CancellationToken cancellationToken = default);
     Task RejectAsync(ParsedDocument doc, int approverUserId, string comment, CancellationToken cancellationToken = default);
     Task ReturnToDraftAsync(ParsedDocument doc, int userId, CancellationToken cancellationToken = default);
     Task ArchiveAsync(ParsedDocument doc, int userId, CancellationToken cancellationToken = default);
+    Task<int> BulkArchiveAsync(IReadOnlyList<int> documentIds, int userId, CancellationToken cancellationToken = default);
 }
 
 public sealed class DocumentWorkflowService : IDocumentWorkflowService
 {
     private readonly AppDbContext _db;
+    private readonly INotificationService _notifications;
 
-    public DocumentWorkflowService(AppDbContext db) => _db = db;
+    public DocumentWorkflowService(AppDbContext db, INotificationService notifications)
+    {
+        _db = db;
+        _notifications = notifications;
+    }
 
     public async Task SubmitAsync(
         ParsedDocument doc,
         int authorUserId,
-        int approverUserId,
+        IReadOnlyList<int> approverUserIds,
         string? comment,
+        DateTime? approvalDueAt = null,
         CancellationToken cancellationToken = default)
     {
         if (doc.WorkflowStatus is not (DocumentWorkflowStatuses.Draft or DocumentWorkflowStatuses.Rejected))
             throw new InvalidOperationException("Отправить на согласование можно только черновик или отклонённый документ.");
 
-        var approver = await _db.Users.FindAsync(new object[] { approverUserId }, cancellationToken);
-        if (approver == null)
-            throw new InvalidOperationException("Согласующий не найден.");
+        var ids = approverUserIds.Where(id => id > 0).Distinct().ToList();
+        if (ids.Count == 0)
+            throw new InvalidOperationException("Укажите хотя бы одного согласующего.");
+
+        foreach (var id in ids)
+        {
+            if (!await _db.Users.AnyAsync(u => u.Id == id, cancellationToken))
+                throw new InvalidOperationException($"Согласующий с id={id} не найден.");
+        }
+
+        var oldSteps = await _db.DocumentApprovalSteps.Where(s => s.DocumentId == doc.Id).ToListAsync(cancellationToken);
+        _db.DocumentApprovalSteps.RemoveRange(oldSteps);
+
+        var order = 1;
+        foreach (var approverId in ids)
+        {
+            _db.DocumentApprovalSteps.Add(new DocumentApprovalStep
+            {
+                DocumentId = doc.Id,
+                StepOrder = order++,
+                ApproverUserId = approverId,
+                Status = ApprovalStepStatuses.Pending,
+            });
+        }
 
         doc.WorkflowStatus = DocumentWorkflowStatuses.OnApproval;
-        doc.CurrentApproverUserId = approverUserId;
+        doc.CurrentApproverUserId = ids[0];
         doc.WorkflowComment = comment;
         doc.SubmittedAt = DateTime.UtcNow;
         doc.WorkflowCompletedAt = null;
+        doc.ApprovalDueAt = approvalDueAt;
 
         AddHistory(doc.Id, authorUserId, WorkflowActions.Submitted, comment);
+        await _notifications.NotifyUserAsync(
+            ids[0],
+            "Документ на согласовании",
+            $"Вам направлен документ «{OfficeDtoMapper.DisplayTitle(doc)}» на согласование.",
+            doc.Id,
+            cancellationToken);
     }
 
-    public Task ApproveAsync(ParsedDocument doc, int approverUserId, string? comment, CancellationToken cancellationToken = default)
+    public async Task ApproveAsync(ParsedDocument doc, int approverUserId, string? comment, CancellationToken cancellationToken = default)
     {
         if (doc.WorkflowStatus != DocumentWorkflowStatuses.OnApproval)
             throw new InvalidOperationException("Документ не на согласовании.");
         if (doc.CurrentApproverUserId != approverUserId)
             throw new InvalidOperationException("Вы не назначены согласующим по этому документу.");
 
+        var step = await _db.DocumentApprovalSteps
+            .FirstOrDefaultAsync(s =>
+                s.DocumentId == doc.Id
+                && s.ApproverUserId == approverUserId
+                && s.Status == ApprovalStepStatuses.Pending, cancellationToken);
+        if (step != null)
+        {
+            step.Status = ApprovalStepStatuses.Approved;
+            step.Comment = comment;
+            step.ActedAt = DateTime.UtcNow;
+        }
+
+        var next = await _db.DocumentApprovalSteps
+            .Where(s => s.DocumentId == doc.Id && s.Status == ApprovalStepStatuses.Pending)
+            .OrderBy(s => s.StepOrder)
+            .FirstOrDefaultAsync(cancellationToken);
+
+        if (next != null)
+        {
+            doc.CurrentApproverUserId = next.ApproverUserId;
+            doc.WorkflowComment = comment;
+            AddHistory(doc.Id, approverUserId, WorkflowActions.StepApproved, comment);
+            await _notifications.NotifyUserAsync(
+                next.ApproverUserId,
+                "Следующий этап согласования",
+                $"Документ «{OfficeDtoMapper.DisplayTitle(doc)}» ожидает вашего согласования.",
+                doc.Id,
+                cancellationToken);
+            if (doc.OwnerId.HasValue)
+            {
+                await _notifications.NotifyUserAsync(
+                    doc.OwnerId.Value,
+                    "Этап согласования пройден",
+                    $"Документ «{OfficeDtoMapper.DisplayTitle(doc)}» согласован на промежуточном этапе.",
+                    doc.Id,
+                    cancellationToken);
+            }
+            return;
+        }
+
         doc.WorkflowStatus = DocumentWorkflowStatuses.Approved;
         doc.CurrentApproverUserId = null;
         doc.WorkflowComment = comment;
         doc.WorkflowCompletedAt = DateTime.UtcNow;
-
         AddHistory(doc.Id, approverUserId, WorkflowActions.Approved, comment);
-        return Task.CompletedTask;
+        if (doc.OwnerId.HasValue)
+        {
+            await _notifications.NotifyUserAsync(
+                doc.OwnerId.Value,
+                "Документ согласован",
+                $"Документ «{OfficeDtoMapper.DisplayTitle(doc)}» полностью согласован. Можно подписать.",
+                doc.Id,
+                cancellationToken);
+        }
     }
 
-    public Task RejectAsync(ParsedDocument doc, int approverUserId, string comment, CancellationToken cancellationToken = default)
+    public async Task RejectAsync(ParsedDocument doc, int approverUserId, string comment, CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(comment))
             throw new InvalidOperationException("Укажите комментарий при возврате на доработку.");
@@ -220,30 +308,53 @@ public sealed class DocumentWorkflowService : IDocumentWorkflowService
         if (doc.CurrentApproverUserId != approverUserId)
             throw new InvalidOperationException("Вы не назначены согласующим по этому документу.");
 
+        var step = await _db.DocumentApprovalSteps
+            .FirstOrDefaultAsync(s =>
+                s.DocumentId == doc.Id
+                && s.ApproverUserId == approverUserId
+                && s.Status == ApprovalStepStatuses.Pending, cancellationToken);
+        if (step != null)
+        {
+            step.Status = ApprovalStepStatuses.Rejected;
+            step.Comment = comment.Trim();
+            step.ActedAt = DateTime.UtcNow;
+        }
+
         doc.WorkflowStatus = DocumentWorkflowStatuses.Rejected;
         doc.CurrentApproverUserId = null;
         doc.WorkflowComment = comment.Trim();
         doc.WorkflowCompletedAt = DateTime.UtcNow;
 
         AddHistory(doc.Id, approverUserId, WorkflowActions.Rejected, comment.Trim());
-        return Task.CompletedTask;
+        if (doc.OwnerId.HasValue)
+        {
+            await _notifications.NotifyUserAsync(
+                doc.OwnerId.Value,
+                "Документ возвращён на доработку",
+                $"Документ «{OfficeDtoMapper.DisplayTitle(doc)}»: {comment.Trim()}",
+                doc.Id,
+                cancellationToken);
+        }
     }
 
-    public Task ReturnToDraftAsync(ParsedDocument doc, int userId, CancellationToken cancellationToken = default)
+    public async Task ReturnToDraftAsync(ParsedDocument doc, int userId, CancellationToken cancellationToken = default)
     {
         if (doc.WorkflowStatus == DocumentWorkflowStatuses.Signed)
-            throw new InvalidOperationException("Подписанный документ нельзя вернуть в черновик без отмены подписи (обратитесь к администратору).");
+            throw new InvalidOperationException("Подписанный документ нельзя вернуть в черновик без отмены подписи.");
 
         if (doc.WorkflowStatus is not (DocumentWorkflowStatuses.Rejected or DocumentWorkflowStatuses.Approved))
             throw new InvalidOperationException("Вернуть в черновик можно отклонённый или согласованный документ.");
+
+        var steps = await _db.DocumentApprovalSteps.Where(s => s.DocumentId == doc.Id).ToListAsync(cancellationToken);
+        _db.DocumentApprovalSteps.RemoveRange(steps);
 
         doc.WorkflowStatus = DocumentWorkflowStatuses.Draft;
         doc.CurrentApproverUserId = null;
         doc.SubmittedAt = null;
         doc.WorkflowCompletedAt = null;
+        doc.ApprovalDueAt = null;
 
         AddHistory(doc.Id, userId, WorkflowActions.ReturnedToDraft, null);
-        return Task.CompletedTask;
     }
 
     public Task ArchiveAsync(ParsedDocument doc, int userId, CancellationToken cancellationToken = default)
@@ -254,6 +365,20 @@ public sealed class DocumentWorkflowService : IDocumentWorkflowService
         doc.WorkflowStatus = DocumentWorkflowStatuses.Archived;
         AddHistory(doc.Id, userId, WorkflowActions.Archived, null);
         return Task.CompletedTask;
+    }
+
+    public async Task<int> BulkArchiveAsync(IReadOnlyList<int> documentIds, int userId, CancellationToken cancellationToken = default)
+    {
+        var count = 0;
+        foreach (var id in documentIds.Distinct())
+        {
+            var doc = await _db.ParsedDocuments.FirstOrDefaultAsync(d => d.Id == id, cancellationToken);
+            if (doc == null || doc.WorkflowStatus != DocumentWorkflowStatuses.Signed) continue;
+            doc.WorkflowStatus = DocumentWorkflowStatuses.Archived;
+            AddHistory(doc.Id, userId, WorkflowActions.Archived, "bulk");
+            count++;
+        }
+        return count;
     }
 
     private void AddHistory(int documentId, int? userId, string action, string? comment)

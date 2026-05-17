@@ -1,28 +1,37 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type {
-  ChecklistValidateResult,
-  ExtractedEntities,
   ParsedDocument,
   SpellcheckMistake,
   SpellcheckResponse,
 } from './types/api';
 import { normalizeNewlines } from './lib/text';
+import { isKnownRussianSpellWord } from './lib/russianSpellLexicon';
 import {
   deleteDocument as deleteDocumentRequest,
+  downloadOriginalDocument,
   exportDocument,
-  fetchDocumentEntities,
   getDocument,
   parseBatch,
   parseDocument,
   runSpellcheck,
+  fetchGigaChatStatus,
+  regenerateDocumentSummary,
   saveDocumentText,
   sendDocumentByEmail,
-  validateDocumentChecklist,
 } from './api/backend';
+import { DATA_CLASSIFICATION_LABELS } from './types/office';
+import { optionsFromLabels } from './components/AppSelect';
 import { prepareDocLikeSource, renderDocLikeText, renderHighlightedText } from './components/DocumentTextViews';
+import { DocumentPagedView } from './components/DocumentPagedView';
+import {
+  DocumentTextComparePanel,
+  DocumentTextViewModeToolbar,
+  type DocumentTextViewMode,
+} from './components/DocumentTextComparePanel';
+import { DocumentTextViewModal } from './components/DocumentTextViewModal';
+import { splitDocumentIntoPages } from './lib/documentPages';
 import { AdminAuditView } from './components/AdminAuditView';
 import { AdminUsersView } from './components/AdminUsersView';
-import { AiRewriteModal } from './components/AiRewriteModal';
 import { DocumentSharePanel } from './components/DocumentSharePanel';
 import { DocumentMetadataPanel } from './components/DocumentMetadataPanel';
 import { DocumentRegistryView } from './components/DocumentRegistryView';
@@ -31,13 +40,20 @@ import { DocumentWorkspace } from './components/DocumentWorkspace';
 import { MyTasksView } from './components/MyTasksView';
 import { OfficeWorkflowPanel } from './components/OfficeWorkflowPanel';
 import { DocumentSignaturePanel } from './components/DocumentSignaturePanel';
+import { DocumentCommentsPanel } from './components/DocumentCommentsPanel';
+import { UserHeaderMenu } from './components/UserHeaderMenu';
+import { AdminDepartmentsView } from './components/AdminDepartmentsView';
+import { useDocumentEditLock } from './hooks/useDocumentEditLock';
 import { LoginScreen } from './components/LoginScreen';
 import { ProfileSettingsModal } from './components/ProfileSettingsModal';
 import type { AuthResponse } from './types/api';
 import { IconEdit, IconFolder, IconLogo, IconStack, IconTasks, IconUpload } from './components/AppIcons';
+import { AppSelect } from './components/AppSelect';
+import { UploadProgressBar } from './components/UploadProgressBar';
+import { createServerWaitProgress } from './lib/parseUploadProgress';
+import { useParseProgressHub } from './hooks/useParseProgressHub';
 import { fetchCurrentUser, fetchMyTasks } from './api/office';
 import type { CurrentUser, MainView } from './types/office';
-import { ROLE_LABELS } from './types/office';
 import { findTextMatches } from './lib/search';
 
 function sameSpellcheckMistake(a: SpellcheckMistake, b: SpellcheckMistake): boolean {
@@ -65,8 +81,24 @@ function adjustSpellcheckMistakesAfterReplace(
 }
 
 function App() {
+  useEffect(() => {
+    document.body.style.overflow = '';
+    return () => {
+      document.body.style.overflow = '';
+    };
+  }, []);
+
+  useEffect(() => {
+    void fetchGigaChatStatus()
+      .then((status) => setGigaChatConfigured(status.configured))
+      .catch(() => setGigaChatConfigured(null));
+  }, []);
+
   const [file, setFile] = useState<File | null>(null);
   const [isUploading, setIsUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [uploadProgressLabel, setUploadProgressLabel] = useState('');
+  const parseProgressHub = useParseProgressHub();
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<ParsedDocument | null>(null);
   const [authToken, setAuthToken] = useState<string | null>(() => localStorage.getItem('authToken'));
@@ -92,26 +124,45 @@ function App() {
   const [textSearchQuery, setTextSearchQuery] = useState('');
   const [textSearchActiveIndex, setTextSearchActiveIndex] = useState(0);
   const textSearchInputRef = useRef<HTMLInputElement | null>(null);
-  const [processingProfile, setProcessingProfile] = useState('general');
   const [dataClassification, setDataClassification] = useState('Internal');
   const [batchFiles, setBatchFiles] = useState<File[]>([]);
   const [isBatchUploading, setIsBatchUploading] = useState(false);
+  const [batchProgress, setBatchProgress] = useState(0);
+  const [batchProgressLabel, setBatchProgressLabel] = useState('');
   const [batchSummary, setBatchSummary] = useState<string | null>(null);
-  const [entitiesData, setEntitiesData] = useState<ExtractedEntities | null>(null);
-  const [entitiesLoading, setEntitiesLoading] = useState(false);
-  const [checklistId, setChecklistId] = useState('contract_basic');
-  const [checklistResult, setChecklistResult] = useState<ChecklistValidateResult | null>(null);
-  const [checklistLoading, setChecklistLoading] = useState(false);
+  const [aiSummaryBusy, setAiSummaryBusy] = useState(false);
+  const [gigaChatConfigured, setGigaChatConfigured] = useState<boolean | null>(null);
   const [mainView, setMainView] = useState<MainView>('registry');
+
+  const classificationOptions = useMemo(() => optionsFromLabels(DATA_CLASSIFICATION_LABELS), []);
   const [pendingTasksCount, setPendingTasksCount] = useState(0);
   const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
   const [profileOpen, setProfileOpen] = useState(false);
-  const [rewriteOpen, setRewriteOpen] = useState(false);
+  const [documentTextViewMode, setDocumentTextViewMode] = useState<DocumentTextViewMode>('processed');
+  const [textViewModalOpen, setTextViewModalOpen] = useState(false);
+
+  useEffect(() => {
+    setDocumentTextViewMode('processed');
+    setTextViewModalOpen(false);
+  }, [result?.id]);
 
   const isAdmin = currentUser?.role === 'Admin';
   const documentTextLocked = Boolean(
     authToken && result?.canEdit === false && result.ownerId != null,
   );
+
+  const { lock: editLock } = useDocumentEditLock(
+    authToken,
+    result?.id ?? null,
+    Boolean(result && isEditing && !documentTextLocked),
+  );
+
+  const editLockMessage =
+    editLock && !editLock.canEdit && editLock.lockedByEmail
+      ? `Сейчас редактирует: ${editLock.lockedByEmail}`
+      : null;
+
+  const editorLocked = documentTextLocked || Boolean(editLock && !editLock.canEdit);
 
   useEffect(() => {
     if (!authToken) {
@@ -156,8 +207,6 @@ function App() {
     setActiveMistakeIndex(-1);
     setTextSearchQuery('');
     setTextSearchActiveIndex(0);
-    setEntitiesData(null);
-    setChecklistResult(null);
   }, [result?.id]);
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -175,18 +224,42 @@ function App() {
     }
 
     setIsUploading(true);
+    setUploadProgress(0);
+    setUploadProgressLabel('Подготовка…');
     setError(null);
     setBatchSummary(null);
+
+    const progress = createServerWaitProgress((p) => {
+      setUploadProgress(p.percent);
+      setUploadProgressLabel(p.message);
+    });
+
     try {
-      const data = await parseDocument(file, authToken, {
-        processingProfile,
-        dataClassification,
+      await parseProgressHub.subscribe(authToken, (ev) => {
+        progress.applyServerPageProgress(ev);
       });
+
+      const data = await parseDocument(
+        file,
+        authToken,
+        {
+          dataClassification,
+        },
+        (p) => {
+          setUploadProgress(p.percent);
+          setUploadProgressLabel(p.message);
+        },
+        progress,
+      );
       setResult(data);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Неизвестная ошибка');
     } finally {
+      progress.stop();
+      await parseProgressHub.unsubscribe();
       setIsUploading(false);
+      setUploadProgress(0);
+      setUploadProgressLabel('');
     }
   };
 
@@ -202,13 +275,23 @@ function App() {
     }
 
     setIsBatchUploading(true);
+    setBatchProgress(0);
+    setBatchProgressLabel('Подготовка…');
     setError(null);
     setBatchSummary(null);
     try {
-      const r = await parseBatch(batchFiles.slice(0, 30), authToken, {
-        processingProfile,
-        dataClassification,
-      });
+      const r = await parseBatch(
+        batchFiles.slice(0, 30),
+        authToken,
+        {
+          dataClassification,
+        },
+        null,
+        (p) => {
+          setBatchProgress(p.percent);
+          setBatchProgressLabel(p.message);
+        },
+      );
       if (r.documents.length > 0) {
         setResult(r.documents[0]);
       } else {
@@ -222,6 +305,8 @@ function App() {
       setError(e instanceof Error ? e.message : 'Ошибка пакетной загрузки');
     } finally {
       setIsBatchUploading(false);
+      setBatchProgress(0);
+      setBatchProgressLabel('');
     }
   };
 
@@ -252,39 +337,9 @@ function App() {
     setMainView('registry');
     localStorage.removeItem('authToken');
     localStorage.removeItem('authEmail');
-    setEntitiesData(null);
-    setChecklistResult(null);
     setSpellcheck(null);
     setFile(null);
     setBatchFiles([]);
-  };
-
-  const handleFetchEntities = async () => {
-    if (!authToken || !result) return;
-    setEntitiesLoading(true);
-    setEntitiesData(null);
-    setError(null);
-    try {
-      setEntitiesData(await fetchDocumentEntities(authToken, result.id));
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Не удалось извлечь сущности');
-    } finally {
-      setEntitiesLoading(false);
-    }
-  };
-
-  const handleValidateChecklist = async () => {
-    if (!authToken || !result || !checklistId.trim()) return;
-    setChecklistLoading(true);
-    setChecklistResult(null);
-    setError(null);
-    try {
-      setChecklistResult(await validateDocumentChecklist(authToken, result.id, checklistId.trim()));
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Проверка чек-листа не выполнена');
-    } finally {
-      setChecklistLoading(false);
-    }
   };
 
   const openSendModal = (docId: number, fileName: string) => {
@@ -390,7 +445,7 @@ function App() {
     }
   };
 
-  const handleExport = async (format: 'docx' | 'pdf') => {
+  const handleExport = async (format: 'docx' | 'pdf' | 'signed-pdf') => {
     if (!result || !authToken) {
       setError('Экспорт DOCX/PDF доступен после входа в аккаунт.');
       return;
@@ -461,9 +516,14 @@ function App() {
     try {
       const docCtx = result?.id != null ? { documentId: result.id } : undefined;
       const data = await runSpellcheck(normalizedText, authToken, docCtx);
-      setSpellcheck(data);
+      const filtered = {
+        ...data,
+        mistakes: data.mistakes.filter((m) => !isKnownRussianSpellWord(m.word)),
+        spellcheckEngine: data.spellcheckEngine ?? 'hunspell',
+      };
+      setSpellcheck(filtered);
       setSpellcheckSourceText(normalizedText);
-      setActiveMistakeIndex(data.mistakes.length > 0 ? 0 : -1);
+      setActiveMistakeIndex(filtered.mistakes.length > 0 ? 0 : -1);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Не удалось проверить орфографию');
     } finally {
@@ -581,10 +641,21 @@ function App() {
     return spellcheck ? spellcheckSourceText : full;
   }, [result, isEditing, editText, spellcheck, spellcheckSourceText]);
 
-  const textSearchMatches = useMemo(
-    () => findTextMatches(displaySearchText, textSearchQuery),
-    [displaySearchText, textSearchQuery],
-  );
+  const textSearchMatches = useMemo(() => {
+    const q = textSearchQuery.trim();
+    if (!q) return [];
+    if (isEditing) return findTextMatches(editText, q);
+    const full = normalizeNewlines(result?.fullText ?? '');
+    const usePaged =
+      !isEditing && result && (!spellcheck || (spellcheck.mistakes?.length ?? 0) === 0);
+    if (usePaged) {
+      const pages = splitDocumentIntoPages(full).map((p) => prepareDocLikeSource(p));
+      if (pages.length > 1) {
+        return pages.flatMap((pageText) => findTextMatches(pageText, q));
+      }
+    }
+    return findTextMatches(displaySearchText, q);
+  }, [displaySearchText, textSearchQuery, isEditing, editText, result, spellcheck]);
 
   useEffect(() => {
     setTextSearchActiveIndex(0);
@@ -694,34 +765,21 @@ function App() {
           <div className="app-brand-text">
             <h1>DocParseLab</h1>
             <p>ИС документов офиса: реестр, согласование, разбор PDF/DOCX и правка текста.</p>
-            <div className="feature-pills">
-              <span className="feature-pill">Реестр</span>
-              <span className="feature-pill">Согласование</span>
-              <span className="feature-pill">Орфография AI</span>
-            </div>
           </div>
         </div>
-        <div className="auth-panel">
-            <div className="auth-info">
-              <span className="auth-user-line">
-                {currentUser?.displayName || authEmail}
-                {currentUser?.role && (
-                  <span className="auth-role-badge">{ROLE_LABELS[currentUser.role] ?? currentUser.role}</span>
-                )}
-              </span>
-              {currentUser?.departmentName && (
-                <span className="auth-dept-line">{currentUser.departmentName}</span>
-              )}
-              <div className="auth-info-actions">
-                <button type="button" className="btn-ghost" onClick={() => setProfileOpen(true)}>
-                  Профиль
-                </button>
-                <button type="button" className="btn-ghost" onClick={handleLogout}>
-                  Выйти
-                </button>
-              </div>
-            </div>
-        </div>
+        <UserHeaderMenu
+          token={authToken}
+          user={currentUser}
+          email={authEmail ?? ''}
+          onOpenProfile={() => setProfileOpen(true)}
+          onLogout={handleLogout}
+          onOpenDocument={(docId) => {
+            void getDocument(authToken, docId).then((d) => {
+              setResult(d);
+              setMainView('workspace');
+            });
+          }}
+        />
       </header>
 
       <nav className="main-nav" aria-label="Разделы">
@@ -742,10 +800,11 @@ function App() {
           )}
         </nav>
       {mainView === 'admin' && isAdmin && (
-        <>
+        <div className="admin-page">
           <AdminUsersView token={authToken} />
+          <AdminDepartmentsView token={authToken} />
           <AdminAuditView token={authToken} />
-        </>
+        </div>
       )}
       {mainView === 'registry' && (
         <DocumentRegistryView token={authToken} onOpenDocument={(id) => void openDocumentById(id)} onSwitchView={setMainView} />
@@ -770,38 +829,40 @@ function App() {
                 type="file"
                 accept="application/pdf,.docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                 onChange={handleFileChange}
+                disabled={isUploading}
               />
               <span className="upload-dropzone-title">
                 {file ? file.name : 'Нажмите или перетащите файл'}
               </span>
               <span className="upload-dropzone-hint">PDF, DOCX</span>
             </label>
-            <button
-              type="button"
-              className="btn-primary btn-lg"
-              onClick={() => void handleUpload()}
-              disabled={isUploading || !file}
-            >
-              {isUploading ? 'Обработка…' : 'Загрузить и распарсить'}
-            </button>
+            <div className="upload-submit-block">
+              <button
+                type="button"
+                className="btn-primary btn-lg"
+                onClick={() => void handleUpload()}
+                disabled={isUploading || !file}
+              >
+                {isUploading ? 'Обработка…' : 'Загрузить и распарсить'}
+              </button>
+              {isUploading && (
+                <UploadProgressBar percent={uploadProgress} label={uploadProgressLabel} />
+              )}
+            </div>
           </div>
         </div>
         <div className="upload-options-grid">
           <label className="parse-field">
-            <span className="parse-field-label">Профиль обработки</span>
-            <select value={processingProfile} onChange={(e) => setProcessingProfile(e.target.value)}>
-              <option value="general">Общий</option>
-              <option value="contract">Договор</option>
-              <option value="instruction">Инструкция</option>
-            </select>
-          </label>
-          <label className="parse-field">
             <span className="parse-field-label">Классификация</span>
-            <select value={dataClassification} onChange={(e) => setDataClassification(e.target.value)}>
-              <option value="Internal">Internal</option>
-              <option value="Public">Public</option>
-              <option value="Confidential">Confidential (без GigaChat)</option>
-            </select>
+            <AppSelect
+              value={dataClassification}
+              onChange={setDataClassification}
+              options={classificationOptions.map((o) =>
+                o.value === 'Confidential'
+                  ? { ...o, label: `${o.label} (без GigaChat)` }
+                  : o,
+              )}
+            />
           </label>
         </div>
         <div className="upload-batch">
@@ -822,14 +883,19 @@ function App() {
               />
               {batchFiles.length ? `Выбрано: ${batchFiles.length}` : 'Выбрать файлы'}
             </label>
-            <button
-              type="button"
-              className="btn-secondary"
-              onClick={() => void handleBatchUpload()}
-              disabled={isBatchUploading || batchFiles.length === 0}
-            >
-              {isBatchUploading ? 'Загрузка…' : 'Загрузить пакет'}
-            </button>
+            <div className="upload-submit-block upload-submit-block--batch">
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={() => void handleBatchUpload()}
+                disabled={isBatchUploading || batchFiles.length === 0}
+              >
+                {isBatchUploading ? 'Загрузка…' : 'Загрузить пакет'}
+              </button>
+              {isBatchUploading && (
+                <UploadProgressBar percent={batchProgress} label={batchProgressLabel} />
+              )}
+            </div>
           </div>
         </div>
       </section>
@@ -843,9 +909,15 @@ function App() {
           document={result}
           authToken={authToken}
           documentTextLocked={documentTextLocked}
+          editLockMessage={editLockMessage}
           onBack={() => setMainView('registry')}
           onDownloadJson={handleDownloadJson}
           onExport={(fmt) => void handleExport(fmt)}
+          onDownloadOriginal={
+            result.hasOriginalFile && authToken
+              ? () => void downloadOriginalDocument(authToken, result.id, result.fileName)
+              : undefined
+          }
           onSendEmail={() => openSendModal(result.id, result.fileName)}
           onDelete={() => openDeleteModal(result.id, result.fileName)}
           sidebar={
@@ -864,6 +936,7 @@ function App() {
                     onUpdated={setResult}
                     onError={(msg) => setError(msg)}
                   />
+                  <DocumentCommentsPanel token={authToken} documentId={result.id} />
                   <DocumentMetadataPanel
                     token={authToken}
                     document={result}
@@ -885,45 +958,10 @@ function App() {
                     documentId={result.id}
                     onApplyVersion={handleApplyVersionText}
                     onRestoreVersion={handleRestoreVersion}
-                    applyDisabled={documentTextLocked}
+                    applyDisabled={editorLocked}
                   />
                 </>
               )}
-              {authToken && (
-                <div className="doc-sidebar-block">
-                  <h3 className="doc-sidebar-block__title">Проверки и извлечение</h3>
-              <button type="button" onClick={() => void handleFetchEntities()} disabled={entitiesLoading}>
-                {entitiesLoading ? 'Извлечение…' : 'Извлечь даты, суммы, ИНН'}
-              </button>
-              <div className="checklist-inline">
-                <input
-                  type="text"
-                  value={checklistId}
-                  onChange={(e) => setChecklistId(e.target.value)}
-                  placeholder="ID чек-листа"
-                  aria-label="Идентификатор чек-листа"
-                />
-                <button
-                  type="button"
-                  className="btn-secondary"
-                  onClick={() => void handleValidateChecklist()}
-                  disabled={checklistLoading}
-                >
-                  {checklistLoading ? '…' : 'Чек-лист'}
-                </button>
-              </div>
-              {checklistResult && (
-                <p className={checklistResult.ok ? 'checklist-ok' : 'checklist-bad'}>
-                  {checklistResult.ok
-                    ? `Чек-лист «${checklistResult.checklistId}»: всё найдено.`
-                    : `Чек-лист «${checklistResult.checklistId}»: не хватает — ${checklistResult.missing.join('; ')}`}
-                </p>
-              )}
-              {entitiesData && (
-                <pre className="entities-pre">{JSON.stringify(entitiesData, null, 2)}</pre>
-              )}
-            </div>
-          )}
             </>
           }
           editor={
@@ -936,6 +974,25 @@ function App() {
                   </span>
                 )}
               </div>
+              {authToken && !isEditing && (
+                <div className="doc-text-inline-actions">
+                  <DocumentTextViewModeToolbar
+                    viewMode={documentTextViewMode}
+                    onViewModeChange={setDocumentTextViewMode}
+                    showSource={
+                      Boolean(result.hasOriginalFile) &&
+                      (result.originalFileType ?? '').toLowerCase() === 'pdf'
+                    }
+                  />
+                  <button
+                    type="button"
+                    className="btn-secondary btn-sm"
+                    onClick={() => setTextViewModalOpen(true)}
+                  >
+                    На весь экран
+                  </button>
+                </div>
+              )}
               <div className="editor-toolbar">
                 <div className="text-search-row">
                   <label className="text-search-label" htmlFor="text-search-input">
@@ -976,8 +1033,12 @@ function App() {
                   <div className="editor-toolbar-left">
                   {!isEditing ? (
                     <button
-                      disabled={documentTextLocked}
-                      title={documentTextLocked ? 'Редактирование недоступно для текущего статуса' : undefined}
+                      disabled={editorLocked}
+                      title={
+                        documentTextLocked
+                          ? 'Редактирование недоступно для текущего статуса'
+                          : editLockMessage ?? undefined
+                      }
                       onClick={() => {
                         setIsEditing(true);
                         setEditText(normalizeNewlines(result.fullText ?? ''));
@@ -1009,26 +1070,10 @@ function App() {
                   )}
 
                   <button onClick={handleSpellcheck} disabled={isSpellchecking}>
-                    {isSpellchecking ? 'Проверка (нейросеть)...' : 'Проверить орфографию (нейросеть)'}
+                    {isSpellchecking ? 'Проверка…' : 'Проверить орфографию'}
                   </button>
 
                   <button onClick={() => void copyCurrentText()}>{isEditing ? 'Копировать из редактора' : 'Копировать текст'}</button>
-
-                  <button
-                    type="button"
-                    disabled={
-                      result.dataClassification === 'Confidential' ||
-                      (isEditing ? !editText.trim() : !(result.fullText ?? '').trim())
-                    }
-                    title={
-                      result.dataClassification === 'Confidential'
-                        ? 'Для Confidential переписывание через GigaChat недоступно'
-                        : undefined
-                    }
-                    onClick={() => setRewriteOpen(true)}
-                  >
-                    AI-переписать
-                  </button>
 
                   {isEditing && spellcheck && spellcheck.mistakes.length > 0 && (
                     <button onClick={() => void applyAllSuggestions()} disabled={isSpellchecking}>
@@ -1088,11 +1133,7 @@ function App() {
                         <div className="mistakes-title">Ошибки</div>
                         <div className="mistakes-badge">{spellcheck.mistakes.length}</div>
                       </div>
-                      {spellcheck.spellcheckEngine === 'hunspell' && (
-                        <p className="spell-engine-hint mistakes-engine-hint">
-                          Локальная проверка (Confidential).
-                        </p>
-                      )}
+                      <p className="spell-engine-hint mistakes-engine-hint">Локальная проверка (Hunspell).</p>
                       <div className="mistakes-list">
                         {spellcheck.mistakes.length > normalizedMistakes.length && (
                           <div className="mistakes-footer" style={{ marginBottom: 10 }}>
@@ -1151,14 +1192,45 @@ function App() {
                     const q = textSearchQuery.trim();
                     const searchM = q ? textSearchMatches : undefined;
                     const searchIdx = q ? textSearchActiveIndex : undefined;
-                    return !spellcheck || spellcheck.mistakes.length === 0
-                      ? renderDocLikeText(normalizeNewlines(result.fullText || ''), searchM, searchIdx)
-                      : renderHighlightedText(
-                          spellcheck ? spellcheckSourceText : normalizeNewlines(result.fullText || ''),
-                          spellcheck?.mistakes ?? [],
-                          searchM,
-                          searchIdx,
-                        );
+                    const full = normalizeNewlines(result.fullText || '');
+                    if (spellcheck && spellcheck.mistakes.length > 0) {
+                      return renderHighlightedText(
+                        spellcheck ? spellcheckSourceText : full,
+                        spellcheck?.mistakes ?? [],
+                        searchM,
+                        searchIdx,
+                      );
+                    }
+                    if (authToken) {
+                      return (
+                        <div className="doc-text-inline-view">
+                          <DocumentTextComparePanel
+                            processedText={full}
+                            originalText={normalizeNewlines(result.originalText ?? '')}
+                            documentId={result.id}
+                            authToken={authToken}
+                            isPdf={(result.originalFileType ?? '').toLowerCase() === 'pdf'}
+                            hasOriginalFile={Boolean(result.hasOriginalFile)}
+                            initialPdfPageCount={result.originalPageCount ?? null}
+                            searchQuery={textSearchQuery}
+                            activeSearchIndex={textSearchActiveIndex}
+                            onSearchIndexChange={setTextSearchActiveIndex}
+                            viewMode={documentTextViewMode}
+                          />
+                        </div>
+                      );
+                    }
+                    return (
+                      <DocumentPagedView
+                        fullText={full}
+                        searchQuery={textSearchQuery}
+                        activeSearchIndex={textSearchActiveIndex}
+                        onSearchIndexChange={setTextSearchActiveIndex}
+                        renderPage={(pageText, pageSearchM, pageSearchIdx) =>
+                          renderDocLikeText(pageText, pageSearchM, pageSearchIdx)
+                        }
+                      />
+                    );
                   })()}
                 </div>
               )}
@@ -1171,11 +1243,7 @@ function App() {
                       {spellcheck.mistakes.length === 0 ? 'Ошибок не найдено.' : `Найдено ошибок: ${spellcheck.mistakes.length}`}
                       {spellcheck.mistakes.length > 0 && <span className="spell-summary-hint"> (включите “Редактировать”, чтобы исправлять кликом)</span>}
                     </div>
-                    {spellcheck.spellcheckEngine === 'hunspell' && (
-                      <p className="spell-engine-hint">
-                        Локальная проверка (Hunspell), без GigaChat — классификация документа Confidential.
-                      </p>
-                    )}
+                    <p className="spell-engine-hint">Локальная проверка (Hunspell).</p>
                   </div>
                 )
               )}
@@ -1183,11 +1251,71 @@ function App() {
           }
           aiSummary={
             <details className="doc-ai-details" open>
-              <summary>AI-описание документа</summary>
+              <summary>Описание документа</summary>
               <div className="doc-ai-details__body">
-                {result.aiSummary && result.aiSummary.trim().length > 0
-                  ? result.aiSummary
-                  : '(описание от GigaChat отсутствует)'}
+                {(() => {
+                  const raw = result.aiSummary?.trim() ?? '';
+                  const local = raw.startsWith('[local-summary]');
+                  const legacyUnavailable = raw.startsWith('Краткое AI-описание недоступно');
+                  const text = local
+                    ? raw.slice('[local-summary]'.length).trimStart()
+                    : legacyUnavailable && raw.includes('\n\n')
+                      ? raw.slice(raw.indexOf('\n\n') + 2)
+                      : raw;
+
+                  if (!text) {
+                    return (
+                      <p className="doc-ai-details__hint">
+                        Описание не сформировано. Нажмите «Обновить описание» или загрузите документ заново.
+                      </p>
+                    );
+                  }
+
+                  return (
+                    <>
+                      {local && gigaChatConfigured === false && (
+                        <p className="doc-ai-details__hint doc-ai-details__hint--info">
+                          Автоматическое описание по структуре текста (GigaChat не подключён). Укажите ClientId и
+                          ClientSecret в <code>DocParseLab.Server/gigachat.secrets.json</code> — см. RUN_INSTRUCTIONS.md,
+                          затем перезапустите сервер и нажмите «Обновить описание».
+                        </p>
+                      )}
+                      {local && gigaChatConfigured === true && (
+                        <p className="doc-ai-details__hint doc-ai-details__hint--info">
+                          GigaChat не ответил — показано локальное описание. Проверьте ключи, сертификат в{' '}
+                          <code>certs/</code> и доступ к сети, затем нажмите «Обновить описание».
+                        </p>
+                      )}
+                      {legacyUnavailable && !local && (
+                        <p className="doc-ai-details__hint doc-ai-details__hint--info">
+                          Нажмите «Обновить описание», чтобы получить структурированное описание.
+                        </p>
+                      )}
+                      <div className="doc-ai-details__text">{text}</div>
+                    </>
+                  );
+                })()}
+                {authToken && result.id && (
+                  <button
+                    type="button"
+                    className="btn-secondary btn-sm doc-ai-details__refresh"
+                    disabled={aiSummaryBusy}
+                    onClick={() => {
+                      setAiSummaryBusy(true);
+                      void regenerateDocumentSummary(authToken, result.id)
+                        .then((r) => {
+                          setResult((prev) => (prev ? { ...prev, aiSummary: r.aiSummary } : prev));
+                          if (r.source === 'gigachat') {
+                            setGigaChatConfigured(true);
+                          }
+                        })
+                        .catch((e) => setError(e instanceof Error ? e.message : 'Не удалось обновить описание'))
+                        .finally(() => setAiSummaryBusy(false));
+                    }}
+                  >
+                    {aiSummaryBusy ? 'Формирование…' : 'Обновить описание'}
+                  </button>
+                )}
               </div>
             </details>
           }
@@ -1225,15 +1353,16 @@ function App() {
             <label className="modal-label" htmlFor="send-format-select">
               Формат вложения
             </label>
-            <select
+            <AppSelect
               id="send-format-select"
               value={sendFormat}
-              onChange={(e) => setSendFormat(e.target.value as 'docx' | 'pdf')}
+              onChange={(v) => setSendFormat(v as 'docx' | 'pdf')}
               disabled={isSendingEmail}
-            >
-              <option value="docx">DOCX</option>
-              <option value="pdf">PDF</option>
-            </select>
+              options={[
+                { value: 'docx', label: 'DOCX' },
+                { value: 'pdf', label: 'PDF' },
+              ]}
+            />
 
             <div className="modal-actions">
               <button type="button" onClick={() => closeSendModal()} disabled={isSendingEmail}>
@@ -1247,24 +1376,47 @@ function App() {
         </div>
       )}
 
-      {result && rewriteOpen && (
-        <AiRewriteModal
-          open={rewriteOpen}
-          sourceText={isEditing ? editText : normalizeNewlines(result.fullText ?? '')}
-          documentId={authToken && result.ownerId != null ? result.id : undefined}
-          token={authToken}
-          confidential={result.dataClassification === 'Confidential'}
-          onClose={() => setRewriteOpen(false)}
-          onApply={handleApplyVersionText}
+      {result && authToken && (
+        <DocumentTextViewModal
+          open={textViewModalOpen}
+          onClose={() => setTextViewModalOpen(false)}
+          title={result.title?.trim() || result.fileName}
+          fileName={result.fileName}
+          processedText={normalizeNewlines(result.fullText ?? '')}
+          originalText={normalizeNewlines(result.originalText ?? '')}
+          initialPdfPageCount={result.originalPageCount ?? null}
+          documentId={result.id}
+          authToken={authToken}
+          isPdf={(result.originalFileType ?? '').toLowerCase() === 'pdf'}
+          hasOriginalFile={Boolean(result.hasOriginalFile)}
+          viewMode={documentTextViewMode}
+          onViewModeChange={(mode) => setDocumentTextViewMode(mode)}
+          showSource={
+            Boolean(result.hasOriginalFile) &&
+            (result.originalFileType ?? '').toLowerCase() === 'pdf'
+          }
+          searchQuery={textSearchQuery}
+          onSearchQueryChange={setTextSearchQuery}
+          onSearchPrev={goSearchPrev}
+          onSearchNext={goSearchNext}
+          searchDisabled={textSearchMatches.length === 0}
+          searchMeta={
+            textSearchQuery.trim()
+              ? textSearchMatches.length > 0
+                ? `${textSearchActiveIndex + 1} / ${textSearchMatches.length}`
+                : 'Нет совпадений'
+              : ''
+          }
+          activeSearchIndex={textSearchActiveIndex}
+          onSearchIndexChange={setTextSearchActiveIndex}
         />
       )}
 
-      {profileOpen && authToken && currentUser && (
+      {profileOpen && currentUser && (
         <ProfileSettingsModal
-          token={authToken}
           user={currentUser}
+          isAdmin={isAdmin}
           onClose={() => setProfileOpen(false)}
-          onSaved={setCurrentUser}
         />
       )}
 

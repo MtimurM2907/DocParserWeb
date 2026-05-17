@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { type FormEvent, useEffect, useState } from 'react';
 import { IconLogo } from './AppIcons';
 import { authBootstrap, authLogin, fetchSetupStatus } from '../api/backend';
 import type { AuthResponse } from '../types/api';
@@ -29,7 +29,8 @@ export function LoginScreen({ onAuthenticated }: Props) {
     };
   }, []);
 
-  const submit = async () => {
+  const submit = async (e?: FormEvent) => {
+    e?.preventDefault();
     setError(null);
     if (!email.trim() || !password) {
       setError('Укажите email и пароль.');
@@ -50,8 +51,8 @@ export function LoginScreen({ onAuthenticated }: Props) {
         ? await authBootstrap(email.trim(), password)
         : await authLogin(email.trim(), password);
       onAuthenticated(data);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Ошибка входа');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Ошибка входа');
     } finally {
       setBusy(false);
     }
@@ -60,7 +61,14 @@ export function LoginScreen({ onAuthenticated }: Props) {
   if (needsBootstrap === null) {
     return (
       <div className="login-screen">
-        <p className="registry-meta">Проверка системы…</p>
+        <div className="login-card login-card--loading">
+          <div className="login-brand">
+            <IconLogo className="login-logo" />
+            <h1>DocParseLab</h1>
+            <p className="login-subtitle">Проверка системы…</p>
+          </div>
+          <div className="login-spinner" aria-hidden />
+        </div>
       </div>
     );
   }
@@ -69,56 +77,70 @@ export function LoginScreen({ onAuthenticated }: Props) {
     <div className="login-screen">
       <div className="login-card">
         <div className="login-brand">
-          <IconLogo className="app-logo login-logo" />
+          <IconLogo className="login-logo" />
           <h1>DocParseLab</h1>
+          {needsBootstrap && <span className="login-badge">Первоначальная настройка</span>}
           <p className="login-subtitle">
             {needsBootstrap
-              ? 'Первый запуск: создайте учётную запись администратора'
+              ? 'Создайте учётную запись администратора для запуска системы'
               : 'Вход в информационную систему документов'}
           </p>
         </div>
-        {error && <p className="office-card-error">{error}</p>}
-        <label className="parse-field">
-          <span className="parse-field-label">Email</span>
-          <input
-            type="email"
-            autoComplete="username"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            disabled={busy}
-            onKeyDown={(e) => e.key === 'Enter' && void submit()}
-          />
-        </label>
-        <label className="parse-field">
-          <span className="parse-field-label">Пароль</span>
-          <input
-            type="password"
-            autoComplete={needsBootstrap ? 'new-password' : 'current-password'}
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            disabled={busy}
-            onKeyDown={(e) => e.key === 'Enter' && void submit()}
-          />
-        </label>
-        {needsBootstrap && (
-          <label className="parse-field">
-            <span className="parse-field-label">Повторите пароль</span>
+
+        <form
+          className="login-form login-form--compact"
+          onSubmit={(e) => {
+            void submit(e);
+          }}
+        >
+          {error && (
+            <div className="login-error" role="alert">
+              {error}
+            </div>
+          )}
+
+          <label className="login-field">
+            <span className="login-field__label">Эл. почта</span>
             <input
-              type="password"
-              autoComplete="new-password"
-              value={confirmPassword}
-              onChange={(e) => setConfirmPassword(e.target.value)}
+              type="email"
+              autoComplete="username"
+              placeholder="user@company.ru"
+              value={email}
+              onChange={(ev) => setEmail(ev.target.value)}
               disabled={busy}
-              onKeyDown={(e) => e.key === 'Enter' && void submit()}
             />
           </label>
-        )}
-        <button type="button" className="login-submit" disabled={busy} onClick={() => void submit()}>
-          {busy ? '…' : needsBootstrap ? 'Создать администратора' : 'Войти'}
-        </button>
-        {!needsBootstrap && (
-          <p className="login-hint">Новых пользователей добавляет администратор в разделе «Администрирование».</p>
-        )}
+
+          <label className="login-field">
+            <span className="login-field__label">Пароль</span>
+            <input
+              type="password"
+              autoComplete={needsBootstrap ? 'new-password' : 'current-password'}
+              placeholder="••••••••"
+              value={password}
+              onChange={(ev) => setPassword(ev.target.value)}
+              disabled={busy}
+            />
+          </label>
+
+          {needsBootstrap && (
+            <label className="login-field">
+              <span className="login-field__label">Повторите пароль</span>
+              <input
+                type="password"
+                autoComplete="new-password"
+                placeholder="••••••••"
+                value={confirmPassword}
+                onChange={(ev) => setConfirmPassword(ev.target.value)}
+                disabled={busy}
+              />
+            </label>
+          )}
+
+          <button type="submit" className="login-submit btn-primary" disabled={busy}>
+            {busy ? 'Выполняется вход…' : needsBootstrap ? 'Создать администратора' : 'Войти'}
+          </button>
+        </form>
       </div>
     </div>
   );

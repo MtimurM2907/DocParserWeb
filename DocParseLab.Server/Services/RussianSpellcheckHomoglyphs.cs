@@ -68,22 +68,45 @@ internal static class RussianSpellcheckHomoglyphs
     }
 
     /// <summary>
-    /// Явное исправление для 2–3 букв латиницей рядом с кириллицей (mo→по, ux/ix→их).
+    /// Типичные OCR/раскладка: латиница вместо кириллицы в русском тексте (mo→по, ux→их).
     /// </summary>
     public static string? TryContextualLatinOcrReplacement(string rawToken, string fullText, int tokenStart)
     {
         var inner = StripInvisibleCharacters(rawToken);
-        if (inner.Length is < 2 or > 3) return null;
+        if (inner.Length is < 2 or > 4) return null;
         if (!IsLatinLettersOnly(inner)) return null;
-        if (!HasAdjacentCyrillic(fullText, tokenStart, rawToken.Length)) return null;
+
+        var inRussianContext = HasAdjacentCyrillic(fullText, tokenStart, rawToken.Length)
+                               || IsPredominantlyCyrillicText(fullText);
+
+        if (!inRussianContext) return null;
 
         var lower = inner.ToLowerInvariant();
         return lower switch
         {
             "mo" => MatchCase(inner, "по"),
             "ux" or "ix" => MatchCase(inner, "их"),
+            "ho" => MatchCase(inner, "но"),
+            "ee" => MatchCase(inner, "ее"),
+            "cb" => MatchCase(inner, "сб"),
             _ => null
         };
+    }
+
+    /// <summary>Документ в основном на кириллице (для OCR-правок коротких латинских вставок).</summary>
+    public static bool IsPredominantlyCyrillicText(string text)
+    {
+        if (string.IsNullOrEmpty(text)) return false;
+
+        var cyrillic = 0;
+        var latin = 0;
+        foreach (var ch in text)
+        {
+            if (IsCyrillicLetter(ch)) cyrillic++;
+            else if (IsBasicLatinLetter(ch)) latin++;
+        }
+
+        return cyrillic >= 40 && cyrillic > latin * 4;
     }
 
     /// <summary>Нормализация токена для Hunspell: невидимые символы, латиница как кириллица, смешанные токены.</summary>

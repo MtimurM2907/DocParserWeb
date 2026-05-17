@@ -22,8 +22,16 @@ public class DocumentSignature
 
     public string? Comment { get; set; }
 
-    /// <summary>internal — подпись в системе с фиксацией хеша; external — зарезервировано под УКЭП.</summary>
+    /// <summary>internal — подпись в системе с фиксацией хеша; external — УКЭП/отсоединённая подпись.</summary>
     public string SignatureKind { get; set; } = SignatureKinds.Internal;
+
+    public string? CertificateSubject { get; set; }
+    public string? CertificateThumbprint { get; set; }
+
+    /// <summary>Отсоединённая подпись (CMS/PKCS#7) в Base64, если загружена.</summary>
+    public string? ExternalPayloadBase64 { get; set; }
+
+    public bool? ExternalCryptoVerified { get; set; }
 }
 
 public static class SignatureKinds

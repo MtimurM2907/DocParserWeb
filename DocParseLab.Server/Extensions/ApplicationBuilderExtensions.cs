@@ -1,5 +1,5 @@
 using DocParseLab.Server.Data;
-using DocParseLab.Server.Models;
+using DocParseLab.Server.Hubs;
 using Microsoft.EntityFrameworkCore;
 
 namespace DocParseLab.Server.Extensions;
@@ -20,7 +20,6 @@ public static class ApplicationBuilderExtensions
         try
         {
             await context.Database.MigrateAsync();
-            await SeedOfficeDataAsync(context);
         }
         catch (Exception ex)
         {
@@ -46,25 +45,14 @@ public static class ApplicationBuilderExtensions
         app.UseStaticFiles();
         app.UseHttpsRedirection();
         app.UseCors();
+        app.UseRateLimiter();
         app.UseAuthentication();
         app.UseAuthorization();
         app.MapControllers();
+        app.MapHub<DocumentHub>("/hubs/document");
         app.MapFallbackToFile("/index.html");
 
         return app;
     }
 
-    private static async Task SeedOfficeDataAsync(AppDbContext context)
-    {
-        if (!await context.Departments.AnyAsync())
-        {
-            context.Departments.AddRange(
-                new Department { Name = "Общий отдел" },
-                new Department { Name = "Администрация" },
-                new Department { Name = "Бухгалтерия" },
-                new Department { Name = "Юридический отдел" });
-            await context.SaveChangesAsync();
-        }
-
-    }
 }
