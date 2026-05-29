@@ -134,13 +134,21 @@ export const DOCUMENT_TYPE_LABELS: Record<string, string> = {
   order: 'Приказ',
   contract: 'Договор',
   instruction: 'Инструкция',
+  regulation: 'Регламент',
 };
 
+export const DEFAULT_DATA_CLASSIFICATION = 'Public';
+
 export const DATA_CLASSIFICATION_LABELS: Record<string, string> = {
-  Internal: 'Внутренний',
   Public: 'Публичный',
   Confidential: 'Конфиденциальный',
 };
+
+/** Подпись грифа (устаревший Internal отображается как публичный). */
+export function classificationLabel(value: string | undefined | null): string {
+  if (!value || value === 'Internal') return DATA_CLASSIFICATION_LABELS.Public;
+  return DATA_CLASSIFICATION_LABELS[value] ?? value;
+}
 
 export const OFFICE_ROLES = ['Admin', 'Manager', 'Employee', 'Viewer'] as const;
 

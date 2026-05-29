@@ -160,13 +160,13 @@ public sealed class DocumentEditLockService : IDocumentEditLockService
         _hub = hub;
     }
 
-    public async Task<DocumentEditLockStatus> GetStatusAsync(
+    public Task<DocumentEditLockStatus> GetStatusAsync(
         ParsedDocument doc,
         int userId,
         CancellationToken cancellationToken = default)
     {
-        await ClearExpiredAsync(doc, cancellationToken);
-        return BuildStatus(doc, userId);
+        ApplyExpiredLockInMemory(doc);
+        return Task.FromResult(BuildStatus(doc, userId));
     }
 
     public async Task<DocumentEditLockStatus> AcquireAsync(
@@ -174,6 +174,7 @@ public sealed class DocumentEditLockService : IDocumentEditLockService
         int userId,
         CancellationToken cancellationToken = default)
     {
+        await _db.Entry(doc).ReloadAsync(cancellationToken);
         await ClearExpiredAsync(doc, cancellationToken);
         if (doc.EditLockedByUserId is int lockUser && lockUser != userId
             && doc.EditLockExpiresAt > DateTime.UtcNow)
@@ -185,6 +186,7 @@ public sealed class DocumentEditLockService : IDocumentEditLockService
 
         doc.EditLockedByUserId = userId;
         doc.EditLockExpiresAt = DateTime.UtcNow.Add(DocumentEditLock.DefaultLease);
+        await _db.SaveChangesAsync(cancellationToken);
         await _hub.Clients.Group(DocumentHub.DocumentGroup(doc.Id))
             .SendAsync("lockChanged", BuildStatus(doc, userId), cancellationToken);
         return BuildStatus(doc, userId);
@@ -196,6 +198,7 @@ public sealed class DocumentEditLockService : IDocumentEditLockService
         {
             doc.EditLockedByUserId = null;
             doc.EditLockExpiresAt = null;
+            await _db.SaveChangesAsync(cancellationToken);
             await _hub.Clients.Group(DocumentHub.DocumentGroup(doc.Id))
                 .SendAsync("lockChanged", BuildStatus(doc, userId), cancellationToken);
         }
@@ -206,6 +209,7 @@ public sealed class DocumentEditLockService : IDocumentEditLockService
         if (doc.EditLockedByUserId == userId)
         {
             doc.EditLockExpiresAt = DateTime.UtcNow.Add(DocumentEditLock.DefaultLease);
+            await _db.SaveChangesAsync(cancellationToken);
             await _hub.Clients.Group(DocumentHub.DocumentGroup(doc.Id))
                 .SendAsync("lockChanged", BuildStatus(doc, userId), cancellationToken);
         }
@@ -219,14 +223,30 @@ public sealed class DocumentEditLockService : IDocumentEditLockService
             throw new InvalidOperationException("Документ заблокирован другим пользователем.");
     }
 
+    private static void ApplyExpiredLockInMemory(ParsedDocument doc)
+    {
+        if (doc.EditLockExpiresAt == null || doc.EditLockExpiresAt > DateTime.UtcNow)
+            return;
+        doc.EditLockedByUserId = null;
+        doc.EditLockExpiresAt = null;
+    }
+
     private async Task ClearExpiredAsync(ParsedDocument doc, CancellationToken cancellationToken)
     {
-        if (doc.EditLockExpiresAt != null && doc.EditLockExpiresAt <= DateTime.UtcNow)
-        {
-            doc.EditLockedByUserId = null;
-            doc.EditLockExpiresAt = null;
-            await _db.SaveChangesAsync(cancellationToken);
-        }
+        if (doc.EditLockExpiresAt == null || doc.EditLockExpiresAt > DateTime.UtcNow)
+            return;
+
+        await _db.ParsedDocuments
+            .Where(d => d.Id == doc.Id && d.EditLockExpiresAt != null && d.EditLockExpiresAt <= DateTime.UtcNow)
+            .ExecuteUpdateAsync(
+                s => s
+                    .SetProperty(d => d.EditLockedByUserId, (int?)null)
+                    .SetProperty(d => d.EditLockExpiresAt, (DateTime?)null),
+                cancellationToken);
+
+        doc.EditLockedByUserId = null;
+        doc.EditLockExpiresAt = null;
+        await _db.Entry(doc).ReloadAsync(cancellationToken);
     }
 
     private DocumentEditLockStatus BuildStatus(ParsedDocument doc, int userId)

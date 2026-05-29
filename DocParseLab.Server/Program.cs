@@ -4,6 +4,7 @@ using DocParseLab.Server.Extensions;
 using DocParseLab.Server.Middleware;
 using DocParseLab.Server.Services;
 using DocParseLab.Server.Swagger;
+using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Options;
 using Swashbuckle.AspNetCore.SwaggerGen;
 
@@ -16,6 +17,22 @@ var gigaSecretsLoadedFrom = AddGigaChatSecretsFiles(builder.Configuration, build
 
 // Добавление сервисов
 builder.Services.AddControllers();
+builder.Services.Configure<ApiBehaviorOptions>(options =>
+{
+    options.InvalidModelStateResponseFactory = context =>
+    {
+        var errors = context.ModelState.Values
+            .SelectMany(v => v.Errors)
+            .Select(e => string.IsNullOrWhiteSpace(e.ErrorMessage) ? "Некорректное поле." : e.ErrorMessage)
+            .Take(5)
+            .ToArray();
+        return new BadRequestObjectResult(new DocParseLab.Server.DTOs.ErrorResponse
+        {
+            Message = "Некорректные данные запроса.",
+            Details = errors.Length > 0 ? string.Join("; ", errors) : null,
+        });
+    };
+});
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen(c =>
 {
@@ -71,7 +88,15 @@ static string? AddGigaChatSecretsFiles(IConfigurationBuilder configuration, stri
     return null;
 }
 
-await app.MigrateDatabaseAsync();
+var autoMigrate = builder.Configuration.GetValue<bool>("Database:AutoMigrateOnStartup", true);
+if (autoMigrate)
+{
+    await app.MigrateDatabaseAsync();
+}
+else
+{
+    app.Logger.LogInformation("Автомиграция отключена (Database:AutoMigrateOnStartup=false).");
+}
 
 if (seedDatabase)
 {

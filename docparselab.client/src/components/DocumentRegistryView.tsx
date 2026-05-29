@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Department, DocumentRegistryItem, MainView } from '../types/office';
 import { DOCUMENT_TYPE_LABELS, WORKFLOW_STATUS_LABELS } from '../types/office';
 import { fetchDepartments, fetchRegistry } from '../api/office';
@@ -15,6 +15,7 @@ export function DocumentRegistryView({ token, onOpenDocument, onSwitchView }: Pr
   const [total, setTotal] = useState(0);
   const [departments, setDepartments] = useState<Department[]>([]);
   const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [status, setStatus] = useState('');
   const [documentType, setDocumentType] = useState('');
   const [departmentId, setDepartmentId] = useState('');
@@ -38,9 +39,12 @@ export function DocumentRegistryView({ token, onOpenDocument, onSwitchView }: Pr
   const [mineOnly, setMineOnly] = useState(false);
   const [page, setPage] = useState(0);
   const pageSize = 25;
+  const requestSeqRef = useRef(0);
 
   const load = useCallback(async () => {
+    const currentSeq = ++requestSeqRef.current;
     setLoading(true);
+    setLoadError(null);
     try {
       const pageData = await fetchRegistry(token, {
         status: status || undefined,
@@ -51,13 +55,17 @@ export function DocumentRegistryView({ token, onOpenDocument, onSwitchView }: Pr
         skip: page * pageSize,
         take: pageSize,
       });
+      // Ignore stale responses from older requests.
+      if (currentSeq !== requestSeqRef.current) return;
       setItems(pageData.items);
       setTotal(pageData.total);
-    } catch {
+    } catch (e) {
+      if (currentSeq !== requestSeqRef.current) return;
       setItems([]);
       setTotal(0);
+      setLoadError(e instanceof Error ? e.message : 'Не удалось загрузить реестр документов');
     } finally {
-      setLoading(false);
+      if (currentSeq === requestSeqRef.current) setLoading(false);
     }
   }, [token, status, documentType, departmentId, search, mineOnly, page, pageSize]);
 
@@ -66,7 +74,9 @@ export function DocumentRegistryView({ token, onOpenDocument, onSwitchView }: Pr
   }, [status, documentType, departmentId, search, mineOnly]);
 
   useEffect(() => {
-    void fetchDepartments(token).then(setDepartments).catch(() => setDepartments([]));
+    void fetchDepartments(token)
+      .then(setDepartments)
+      .catch(() => setDepartments([]));
   }, [token]);
 
   useEffect(() => {
@@ -135,6 +145,7 @@ export function DocumentRegistryView({ token, onOpenDocument, onSwitchView }: Pr
           </span>
         )}
       </p>
+      {loadError && <p className="error">{loadError}</p>}
       {items.length === 0 && !loading ? (
         <p className="registry-empty">Документов нет. Загрузите файл или измените фильтры.</p>
       ) : (

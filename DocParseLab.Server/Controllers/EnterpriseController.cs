@@ -7,6 +7,7 @@ using Microsoft.Extensions.Options;
 using DocParseLab.Server.Data;
 using DocParseLab.Server.DTOs;
 using DocParseLab.Server.Extensions;
+using DocParseLab.Server.Models;
 using DocParseLab.Server.Services;
 
 namespace DocParseLab.Server.Controllers;
@@ -25,6 +26,7 @@ public class EnterpriseController : ControllerBase
     private readonly IWebhookService _webhook;
     private readonly IOptions<EnterpriseOptions> _enterpriseOptions;
     private readonly IAuditService _audit;
+    private readonly IFileScanService _fileScan;
     private readonly ILogger<EnterpriseController> _logger;
 
     public EnterpriseController(
@@ -35,6 +37,7 @@ public class EnterpriseController : ControllerBase
         IWebhookService webhook,
         IOptions<EnterpriseOptions> enterpriseOptions,
         IAuditService audit,
+        IFileScanService fileScan,
         ILogger<EnterpriseController> logger)
     {
         _db = db;
@@ -44,6 +47,7 @@ public class EnterpriseController : ControllerBase
         _webhook = webhook;
         _enterpriseOptions = enterpriseOptions;
         _audit = audit;
+        _fileScan = fileScan;
         _logger = logger;
     }
 
@@ -86,7 +90,7 @@ public class EnterpriseController : ControllerBase
         var ctx = new DocumentImportContext
         {
             ProcessingProfile = string.IsNullOrWhiteSpace(processingProfile) ? "general" : processingProfile!,
-            DataClassification = string.IsNullOrWhiteSpace(dataClassification) ? "Internal" : dataClassification!
+            DataClassification = DocumentDataClassifications.Normalize(dataClassification)
         };
 
         var resp = new BatchParseResponse();
@@ -103,6 +107,7 @@ public class EnterpriseController : ControllerBase
 
             try
             {
+                _fileScan.ValidateUpload(file);
                 var entity = await _parser.ParseAndSaveAsync(file, ownerId, ctx, cancellationToken);
                 var ownerEmail = ownerId.HasValue
                     ? await _db.Users.Where(u => u.Id == ownerId.Value).Select(u => u.Email).FirstOrDefaultAsync(cancellationToken)
@@ -112,7 +117,7 @@ public class EnterpriseController : ControllerBase
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Ошибка пакетного разбора {Name}", file.FileName);
-                resp.Errors.Add($"{file.FileName}: {ex.Message}");
+                resp.Errors.Add($"{file.FileName}: не удалось обработать файл.");
             }
         }
 

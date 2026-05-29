@@ -309,6 +309,8 @@ public sealed class OfficeExtrasController : ControllerBase
     {
         if (!User.TryGetUserId(out var userId))
             return Unauthorized();
+        if (request?.DocumentIds == null || request.DocumentIds.Count == 0)
+            return BadRequest(new ErrorResponse { Message = "Укажите хотя бы один документ." });
         var count = await _workflow.BulkArchiveAsync(request.DocumentIds, userId, cancellationToken);
         await _db.SaveChangesAsync(cancellationToken);
         return Ok(new BulkArchiveResponse { ArchivedCount = count });
@@ -377,7 +379,6 @@ public sealed class OfficeExtrasController : ControllerBase
         try
         {
             var status = await _editLock.AcquireAsync(doc, userId, cancellationToken);
-            await _db.SaveChangesAsync(cancellationToken);
             var email = (await _db.Users.AsNoTracking().FirstOrDefaultAsync(u => u.Id == userId, cancellationToken))?.Email;
             return Ok(MapLock(status, email));
         }
@@ -396,7 +397,6 @@ public sealed class OfficeExtrasController : ControllerBase
         if (doc == null)
             return NotFound();
         await _editLock.ReleaseAsync(doc, userId, cancellationToken);
-        await _db.SaveChangesAsync(cancellationToken);
         return NoContent();
     }
 

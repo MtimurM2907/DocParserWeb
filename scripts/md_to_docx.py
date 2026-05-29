@@ -8,8 +8,10 @@ from pathlib import Path
 
 from docx import Document
 from docx.enum.text import WD_LINE_SPACING, WD_ALIGN_PARAGRAPH
-from docx.shared import Cm, Pt
+from docx.enum.table import WD_TABLE_ALIGNMENT
+from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
+from docx.shared import Cm, Pt, RGBColor
 
 
 def set_default_font(doc: Document) -> None:
@@ -61,6 +63,67 @@ def parse_table_row(line: str) -> list[str]:
     return [c.strip() for c in line.split("|")]
 
 
+def _set_cell_shading(cell, fill_hex: str) -> None:
+    shading = OxmlElement("w:shd")
+    shading.set(qn("w:fill"), fill_hex)
+    shading.set(qn("w:val"), "clear")
+    cell._tc.get_or_add_tcPr().append(shading)
+
+
+def _format_cell_text(cell, *, bold: bool = False, size: int = 12) -> None:
+    for paragraph in cell.paragraphs:
+        paragraph.paragraph_format.first_line_indent = Cm(0)
+        paragraph.paragraph_format.space_after = Pt(0)
+        paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER if bold else WD_ALIGN_PARAGRAPH.LEFT
+        if not paragraph.runs and paragraph.text:
+            run = paragraph.add_run(paragraph.text)
+            paragraph.text = ""
+        for run in paragraph.runs:
+            run.bold = bold
+            run.font.name = "Times New Roman"
+            run.font.size = Pt(size)
+            run.font.color.rgb = RGBColor(0, 0, 0)
+
+
+def add_table_caption(doc: Document, text: str) -> None:
+    p = doc.add_paragraph()
+    p.paragraph_format.first_line_indent = Cm(0)
+    p.paragraph_format.space_before = Pt(6)
+    p.paragraph_format.space_after = Pt(3)
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    parts = re.split(r"(\*\*[^*]+\*\*)", text)
+    for part in parts:
+        if not part:
+            continue
+        run = p.add_run(part[2:-2] if part.startswith("**") and part.endswith("**") else part)
+        run.bold = True
+        run.font.name = "Times New Roman"
+        run.font.size = Pt(14)
+
+
+def add_markdown_table(doc: Document, headers: list[str], rows: list[list[str]]) -> None:
+    col_count = len(headers)
+    table = doc.add_table(rows=1 + len(rows), cols=col_count)
+    table.style = "Table Grid"
+    table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    table.autofit = True
+
+    for col, header in enumerate(headers):
+        cell = table.rows[0].cells[col]
+        cell.text = header
+        _format_cell_text(cell, bold=True)
+        _set_cell_shading(cell, "D9E2F3")
+
+    for r_idx, row in enumerate(rows):
+        for c_idx in range(col_count):
+            val = row[c_idx] if c_idx < len(row) else ""
+            cell = table.rows[r_idx + 1].cells[c_idx]
+            cell.text = val
+            _format_cell_text(cell, bold=False)
+
+    doc.add_paragraph()
+
+
 def is_table_separator(line: str) -> bool:
     return bool(re.match(r"^\|[\s\-:|]+\|$", line.strip()))
 
@@ -107,27 +170,19 @@ def convert(md_path: Path, docx_path: Path) -> None:
             continue
 
         if stripped.startswith("|") and i + 1 < len(lines) and is_table_separator(lines[i + 1]):
+            if i > 0:
+                prev = lines[i - 1].strip()
+                if re.match(r"^\*\*Таблица\s+\d+", prev):
+                    cap_text = prev[2:-2] if prev.startswith("**") and prev.endswith("**") else prev
+                    add_table_caption(doc, cap_text)
+
             headers = parse_table_row(stripped)
             i += 2
             rows: list[list[str]] = []
             while i < len(lines) and lines[i].strip().startswith("|"):
                 rows.append(parse_table_row(lines[i]))
                 i += 1
-            table = doc.add_table(rows=1 + len(rows), cols=len(headers))
-            table.style = "Table Grid"
-            for col, h in enumerate(headers):
-                cell = table.rows[0].cells[col]
-                cell.text = h
-                for paragraph in cell.paragraphs:
-                    for run in paragraph.runs:
-                        run.bold = True
-                        run.font.name = "Times New Roman"
-                        run.font.size = Pt(12)
-            for r_idx, row in enumerate(rows):
-                for c_idx, val in enumerate(row):
-                    if c_idx < len(headers):
-                        table.rows[r_idx + 1].cells[c_idx].text = val
-            doc.add_paragraph()
+            add_markdown_table(doc, headers, rows)
             continue
 
         if re.match(r"^\d+\.\s", stripped):
@@ -199,4 +254,9 @@ if __name__ == "__main__":
     out = root / "DocParseLab_пояснительная_записка.docx"
     if len(sys.argv) > 1:
         out = Path(sys.argv[1])
+        if not out.is_absolute():
+            out = root / out
+    if len(sys.argv) > 2:
+        md_arg = Path(sys.argv[2])
+        md = md_arg if md_arg.is_absolute() else root / md_arg
     convert(md, out)

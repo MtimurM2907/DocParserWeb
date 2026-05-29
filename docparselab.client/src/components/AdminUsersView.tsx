@@ -13,6 +13,24 @@ type UserDraft = {
   password: string;
 };
 
+function draftFromUser(user: UserBrief): UserDraft {
+  return {
+    email: user.email,
+    displayName: user.displayName ?? '',
+    role: user.role,
+    departmentId: user.departmentId != null ? String(user.departmentId) : '',
+    password: '',
+  };
+}
+
+function normalizeUserBrief(raw: UserBrief & { Id?: number }): UserBrief {
+  const id = raw.id ?? raw.Id;
+  if (id == null || !Number.isFinite(Number(id))) {
+    throw new Error('Сервер вернул пользователя без id');
+  }
+  return { ...raw, id: Number(id) };
+}
+
 type Props = {
   token: string;
 };
@@ -42,17 +60,12 @@ export function AdminUsersView({ token }: Props) {
     setError(null);
     try {
       const [u, d] = await Promise.all([fetchOfficeUsers(token), fetchDepartments(token)]);
-      setUsers(u);
+      const normalized = u.map((user) => normalizeUserBrief(user as UserBrief & { Id?: number }));
+      setUsers(normalized);
       setDepartments(d);
       const next: Record<number, UserDraft> = {};
-      for (const user of u) {
-        next[user.id] = {
-          email: user.email,
-          displayName: user.displayName ?? '',
-          role: user.role,
-          departmentId: user.departmentId != null ? String(user.departmentId) : '',
-          password: '',
-        };
+      for (const user of normalized) {
+        next[user.id] = draftFromUser(user);
       }
       setDrafts(next);
     } catch (e) {
@@ -199,24 +212,15 @@ export function AdminUsersView({ token }: Props) {
     setError(null);
     setSuccess(null);
     try {
-      const created = await createUserAccount(token, {
-        email: newUser.email.trim(),
-        password: newUser.password,
-        displayName: newUser.displayName.trim(),
-        role: newUser.role,
-        departmentId: parseInt(newUser.departmentId, 10),
-      });
-      setUsers((prev) => [...prev, created].sort((a, b) => a.email.localeCompare(b.email)));
-      setDrafts((prev) => ({
-        ...prev,
-        [created.id]: {
-          email: created.email,
-          displayName: created.displayName ?? '',
-          role: created.role,
-          departmentId: created.departmentId != null ? String(created.departmentId) : '',
-          password: '',
-        },
-      }));
+      const created = normalizeUserBrief(
+        (await createUserAccount(token, {
+          email: newUser.email.trim(),
+          password: newUser.password,
+          displayName: newUser.displayName.trim(),
+          role: newUser.role,
+          departmentId: parseInt(newUser.departmentId, 10),
+        })) as UserBrief & { Id?: number },
+      );
       setNewUser({
         email: '',
         displayName: '',
@@ -224,7 +228,9 @@ export function AdminUsersView({ token }: Props) {
         role: 'Employee',
         departmentId: '',
       });
+      setSearchQuery('');
       setSuccess(`Пользователь ${created.email} создан.`);
+      await load();
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Не удалось создать пользователя');
     } finally {
@@ -258,7 +264,12 @@ export function AdminUsersView({ token }: Props) {
       <div className="office-admin-header">
         <div>
           <h2>Управление пользователями</h2>
-          <p className="office-admin-subtitle">{users.length} учётных записей</p>
+          <p className="office-admin-subtitle">
+            {users.length} учётных записей
+            {searchQuery.trim() && filteredUsers.length !== users.length
+              ? ` · показано ${filteredUsers.length}`
+              : ''}
+          </p>
         </div>
         <button type="button" className="btn-secondary btn-sm" onClick={() => void load()} disabled={loading}>
           {loading ? '…' : 'Обновить'}
@@ -352,8 +363,7 @@ export function AdminUsersView({ token }: Props) {
         ) : (
           <ul className="admin-user-list">
             {filteredUsers.map((u) => {
-              const draft = drafts[u.id];
-              if (!draft) return null;
+              const draft = drafts[u.id] ?? draftFromUser(u);
               return (
                 <li key={u.id} className="admin-user-card">
                   <div className="admin-user-card__badge">{ROLE_LABELS[draft.role] ?? draft.role}</div>

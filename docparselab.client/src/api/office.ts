@@ -33,6 +33,13 @@ export async function fetchOfficeUsers(token: string): Promise<UserBrief[]> {
   return r.json() as Promise<UserBrief[]>;
 }
 
+/** Сотрудники и руководители того же подразделения (для маршрута согласования). */
+export async function fetchApprovalCandidates(token: string): Promise<UserBrief[]> {
+  const r = await fetch('/api/office/approval-candidates', { headers: authHeaders(token) });
+  if (!r.ok) throw new Error(await readResponseError(r, 'Не удалось загрузить список согласующих'));
+  return r.json() as Promise<UserBrief[]>;
+}
+
 export async function fetchRegistry(
   token: string,
   params: {
@@ -101,6 +108,21 @@ export async function submitForApproval(
       comment,
       approvalDueAt,
     }),
+  });
+  if (!r.ok) throw new Error(await readResponseError(r, 'Не удалось отправить на согласование'));
+  return r.json() as Promise<ParsedDocument>;
+}
+
+/** Повторная отправка после доработки — тот же маршрут согласующих, без смены цепочки. */
+export async function resubmitForApproval(
+  token: string,
+  docId: number,
+  comment?: string,
+): Promise<ParsedDocument> {
+  const r = await fetch(`/api/office/documents/${docId}/submit`, {
+    method: 'POST',
+    headers: { ...jsonContent, ...authHeaders(token) },
+    body: JSON.stringify({ approverUserIds: [], comment }),
   });
   if (!r.ok) throw new Error(await readResponseError(r, 'Не удалось отправить на согласование'));
   return r.json() as Promise<ParsedDocument>;

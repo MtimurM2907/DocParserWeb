@@ -11,14 +11,17 @@ export function NotificationsBell({ token, onOpenDocument }: Props) {
   const [open, setOpen] = useState(false);
   const [items, setItems] = useState<UserNotification[]>([]);
   const [panelStyle, setPanelStyle] = useState<React.CSSProperties>({});
+  const [error, setError] = useState<string | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
 
   const load = useCallback(async () => {
     try {
       setItems(await fetchNotifications(token, true));
-    } catch {
+      setError(null);
+    } catch (e) {
       setItems([]);
+      setError(e instanceof Error ? e.message : 'Не удалось загрузить уведомления');
     }
   }, [token]);
 
@@ -115,7 +118,9 @@ export function NotificationsBell({ token, onOpenDocument }: Props) {
                     type="button"
                     className="notifications-list__item"
                     onClick={() => {
-                      void markNotificationRead(token, n.id).then(load);
+                      void markNotificationRead(token, n.id)
+                        .then(() => void load())
+                        .catch((e) => setError(e instanceof Error ? e.message : 'Не удалось отметить уведомление'));
                       if (n.documentId && onOpenDocument) onOpenDocument(n.documentId);
                       setOpen(false);
                     }}
@@ -127,6 +132,7 @@ export function NotificationsBell({ token, onOpenDocument }: Props) {
               ))}
             </ul>
           )}
+          {error && <p className="error">{error}</p>}
         </div>
       </>,
       document.body,

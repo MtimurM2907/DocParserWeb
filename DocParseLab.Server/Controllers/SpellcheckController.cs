@@ -93,8 +93,7 @@ public sealed class SpellcheckController : ControllerBase
             _logger.LogError(ex, "Ошибка проверки орфографии");
             return StatusCode(StatusCodes.Status500InternalServerError, new ErrorResponse
             {
-                Message = "Ошибка проверки орфографии",
-                Details = ex.Message
+                Message = "Ошибка проверки орфографии"
             });
         }
     }

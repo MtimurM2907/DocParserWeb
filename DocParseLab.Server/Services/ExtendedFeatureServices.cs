@@ -93,8 +93,8 @@ public sealed class NotificationService : INotificationService
             CreatedAt = DateTime.UtcNow,
         };
         _db.UserNotifications.Add(entry);
-        await _db.SaveChangesAsync(cancellationToken);
 
+        // Сохранение — в вызывающем коде (один SaveChanges на запрос), иначе ломается optimistic concurrency документа.
         await _realtime.PushNotificationAsync(
             userId,
             new { entry.Id, entry.Title, entry.Body, entry.DocumentId, entry.CreatedAt },

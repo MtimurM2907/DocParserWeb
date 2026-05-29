@@ -611,49 +611,6 @@
   color: var(--danger, #b42318);
 }
 
-.signature-cryptopro-form,
-.signature-external-form {
-  margin-top: 12px;
-  padding-top: 12px;
-  border-top: 1px dashed var(--border);
-}
-
-.signature-cryptopro-form h4 {
-  margin: 0 0 10px;
-  font-size: 0.95rem;
-}
-
-.signature-cryptopro-hint a {
-  color: var(--accent);
-}
-
-.signature-cert-select {
-  width: 100%;
-  padding: 8px 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  font-size: 0.85rem;
-  background: var(--surface);
-  color: var(--text);
-}
-
-.signature-manual-upload {
-  margin-top: 14px;
-  font-size: 0.88rem;
-}
-
-.signature-manual-upload summary {
-  cursor: pointer;
-  color: var(--accent);
-  font-weight: 500;
-}
-
-.signature-manual-upload__body {
-  margin-top: 10px;
-  display: grid;
-  gap: 8px;
-}
-
 .profile-readonly {
   display: grid;
   gap: 12px;

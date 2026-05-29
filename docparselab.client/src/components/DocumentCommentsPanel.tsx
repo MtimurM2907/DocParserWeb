@@ -9,19 +9,31 @@ export function DocumentCommentsPanel({ token, documentId }: Props) {
   const [items, setItems] = useState<DocumentComment[]>([]);
   const [text, setText] = useState('');
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!expanded) return;
-    void fetchDocumentComments(token, documentId).then(setItems).catch(() => setItems([]));
+    void fetchDocumentComments(token, documentId)
+      .then((data) => {
+        setItems(data);
+        setError(null);
+      })
+      .catch((e) => {
+        setItems([]);
+        setError(e instanceof Error ? e.message : 'Не удалось загрузить комментарии');
+      });
   }, [expanded, token, documentId]);
 
   const submit = async () => {
     if (!text.trim()) return;
     setBusy(true);
+    setError(null);
     try {
       const c = await addDocumentComment(token, documentId, text.trim());
       setItems((prev) => [...prev, c]);
       setText('');
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Не удалось добавить комментарий');
     } finally {
       setBusy(false);
     }
@@ -35,6 +47,7 @@ export function DocumentCommentsPanel({ token, documentId }: Props) {
       </button>
       {expanded && (
         <div className="office-card-panel-body">
+          {error && <p className="error">{error}</p>}
           <ul className="comments-list">
             {items.map((c) => (
               <li key={c.id} className="comments-list__item">

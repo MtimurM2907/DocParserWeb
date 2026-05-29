@@ -1,3 +1,4 @@
+using System.ComponentModel.DataAnnotations;
 using DocParseLab.Server.Models;
 using DocParseLab.Server.Services;
 
@@ -23,7 +24,7 @@ public sealed class ParsedDocumentResponse
     public string StructuredJson { get; set; } = string.Empty;
     public int ShareCount { get; set; }
     public string ProcessingProfile { get; set; } = "general";
-    public string DataClassification { get; set; } = "Internal";
+    public string DataClassification { get; set; } = DocumentDataClassifications.Default;
     public string? Title { get; set; }
     public string DocumentType { get; set; } = "general";
     public string WorkflowStatus { get; set; } = "Draft";
@@ -153,6 +154,8 @@ public sealed class PdfPageCountResponse
 
 public sealed class SendDocumentEmailRequest
 {
+    [Required, EmailAddress, MaxLength(256)]
     public string TargetEmail { get; set; } = string.Empty;
+    [RegularExpression("^(docx|pdf)$", ErrorMessage = "Допустимы только docx или pdf.")]
     public string Format { get; set; } = "docx";
 }

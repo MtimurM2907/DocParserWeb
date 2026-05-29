@@ -1,3 +1,5 @@
+using System.ComponentModel.DataAnnotations;
+
 namespace DocParseLab.Server.DTOs;
 
 /// <summary>
@@ -5,16 +7,23 @@ namespace DocParseLab.Server.DTOs;
 /// </summary>
 public sealed class AuthRequest
 {
+    [Required, EmailAddress, MaxLength(256)]
     public string Email { get; set; } = string.Empty;
+    [Required, MinLength(6), MaxLength(200)]
     public string Password { get; set; } = string.Empty;
 }
 
 public sealed class CreateUserRequest
 {
+    [Required, EmailAddress, MaxLength(256)]
     public string Email { get; set; } = string.Empty;
+    [Required, MinLength(6), MaxLength(200)]
     public string Password { get; set; } = string.Empty;
+    [Required, MaxLength(200)]
     public string DisplayName { get; set; } = string.Empty;
+    [MaxLength(32)]
     public string Role { get; set; } = string.Empty;
+    [Range(1, int.MaxValue)]
     public int DepartmentId { get; set; }
 }
 
@@ -42,7 +51,9 @@ public sealed class AuthResponse
 /// </summary>
 public sealed class ShareDocumentRequest
 {
+    [Range(1, int.MaxValue)]
     public int DocumentId { get; set; }
+    [Required, EmailAddress, MaxLength(256)]
     public string TargetEmail { get; set; } = string.Empty;
 }
 
@@ -58,5 +69,6 @@ public sealed class ErrorResponse
 
 public sealed class UpdateDocumentTextRequest
 {
+    [MaxLength(2_000_000)]
     public string Text { get; set; } = string.Empty;
 }

@@ -19,7 +19,10 @@ import {
   saveDocumentText,
   sendDocumentByEmail,
 } from './api/backend';
-import { DATA_CLASSIFICATION_LABELS } from './types/office';
+import {
+  DATA_CLASSIFICATION_LABELS,
+  DEFAULT_DATA_CLASSIFICATION,
+} from './types/office';
 import { optionsFromLabels } from './components/AppSelect';
 import { prepareDocLikeSource, renderDocLikeText, renderHighlightedText } from './components/DocumentTextViews';
 import { DocumentPagedView } from './components/DocumentPagedView';
@@ -124,7 +127,7 @@ function App() {
   const [textSearchQuery, setTextSearchQuery] = useState('');
   const [textSearchActiveIndex, setTextSearchActiveIndex] = useState(0);
   const textSearchInputRef = useRef<HTMLInputElement | null>(null);
-  const [dataClassification, setDataClassification] = useState('Internal');
+  const [dataClassification, setDataClassification] = useState(DEFAULT_DATA_CLASSIFICATION);
   const [batchFiles, setBatchFiles] = useState<File[]>([]);
   const [isBatchUploading, setIsBatchUploading] = useState(false);
   const [batchProgress, setBatchProgress] = useState(0);
@@ -151,7 +154,7 @@ function App() {
     authToken && result?.canEdit === false && result.ownerId != null,
   );
 
-  const { lock: editLock } = useDocumentEditLock(
+  const { lock: editLock, error: editLockError } = useDocumentEditLock(
     authToken,
     result?.id ?? null,
     Boolean(result && isEditing && !documentTextLocked),
@@ -163,6 +166,12 @@ function App() {
       : null;
 
   const editorLocked = documentTextLocked || Boolean(editLock && !editLock.canEdit);
+
+  useEffect(() => {
+    if (editLockError) {
+      setError(editLockError);
+    }
+  }, [editLockError]);
 
   useEffect(() => {
     if (!authToken) {
@@ -440,8 +449,8 @@ function App() {
     if (!source) return;
     try {
       await navigator.clipboard.writeText(source);
-    } catch {
-      // ignore clipboard failures in unsupported contexts
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Не удалось скопировать текст');
     }
   };
 
@@ -487,8 +496,8 @@ function App() {
     if (!authToken || !result?.id) return;
     try {
       setResult(await getDocument(authToken, result.id));
-    } catch {
-      // ignore background refresh errors
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Не удалось обновить документ');
     }
   };
 
@@ -542,8 +551,8 @@ function App() {
         const fresh = await getDocument(authToken, result.id);
         setResult(fresh);
         original = normalizeNewlines(fresh.originalText ?? fresh.fullText ?? '');
-      } catch {
-        // Игнорируем фоновую подгрузку и используем текущий текст.
+      } catch (e) {
+        setError(e instanceof Error ? e.message : 'Не удалось обновить документ перед проверкой орфографии');
       }
     }
     await spellcheckText(original);
@@ -748,8 +757,8 @@ function App() {
     try {
       ta.focus();
       ta.setSelectionRange(m.start, m.end);
-    } catch {
-      // ignore
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Не удалось перейти к ошибке');
     }
   };
 
@@ -774,10 +783,12 @@ function App() {
           onOpenProfile={() => setProfileOpen(true)}
           onLogout={handleLogout}
           onOpenDocument={(docId) => {
-            void getDocument(authToken, docId).then((d) => {
-              setResult(d);
-              setMainView('workspace');
-            });
+            void getDocument(authToken, docId)
+              .then((d) => {
+                setResult(d);
+                setMainView('workspace');
+              })
+              .catch((e) => setError(e instanceof Error ? e.message : 'Не удалось открыть документ'));
           }}
         />
       </header>
@@ -843,7 +854,7 @@ function App() {
                 onClick={() => void handleUpload()}
                 disabled={isUploading || !file}
               >
-                {isUploading ? 'Обработка…' : 'Загрузить и распарсить'}
+                {isUploading ? 'Обработка…' : 'Загрузить'}
               </button>
               {isUploading && (
                 <UploadProgressBar percent={uploadProgress} label={uploadProgressLabel} />

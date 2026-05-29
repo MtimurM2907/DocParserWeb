@@ -1,8 +1,10 @@
+using DocParseLab.Server.Models;
+
 namespace DocParseLab.Server.Services;
 
 /// <summary>Параметры импорта документа (корпоративный контур).</summary>
 public sealed class DocumentImportContext
 {
     public string ProcessingProfile { get; init; } = "general";
-    public string DataClassification { get; init; } = "Internal";
+    public string DataClassification { get; init; } = DocumentDataClassifications.Default;
 }

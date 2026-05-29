@@ -67,6 +67,45 @@ public sealed class OfficeController : ControllerBase
         return Ok(list);
     }
 
+    /// <summary>Коллеги текущего пользователя, которых можно назначить согласующими.</summary>
+    [HttpGet("approval-candidates")]
+    [ProducesResponseType(typeof(List<UserBriefResponse>), StatusCodes.Status200OK)]
+    public async Task<ActionResult<List<UserBriefResponse>>> GetApprovalCandidates(CancellationToken cancellationToken)
+    {
+        if (!User.TryGetUserId(out var userId))
+            return Unauthorized();
+
+        var submitter = await _db.Users.AsNoTracking()
+            .Include(u => u.Department)
+            .FirstOrDefaultAsync(u => u.Id == userId, cancellationToken);
+        if (submitter == null)
+            return Unauthorized();
+
+        if (submitter.DepartmentId == null)
+            return Ok(new List<UserBriefResponse>());
+
+        var list = await _db.Users
+            .AsNoTracking()
+            .Include(u => u.Department)
+            .Where(u =>
+                u.Id != submitter.Id
+                && u.DepartmentId == submitter.DepartmentId
+                && (u.Role == UserRoles.Manager || u.Role == UserRoles.Employee))
+            .OrderBy(u => u.DisplayName ?? u.Email)
+            .Select(u => new UserBriefResponse
+            {
+                Id = u.Id,
+                Email = u.Email,
+                DisplayName = u.DisplayName,
+                Role = u.Role,
+                DepartmentId = u.DepartmentId,
+                DepartmentName = u.Department != null ? u.Department.Name : null
+            })
+            .ToListAsync(cancellationToken);
+
+        return Ok(list);
+    }
+
     [HttpGet("registry")]
     [ProducesResponseType(typeof(DocumentRegistryPageResponse), StatusCodes.Status200OK)]
     public async Task<ActionResult<DocumentRegistryPageResponse>> GetRegistry(
@@ -178,10 +217,10 @@ public sealed class OfficeController : ControllerBase
         if (request.Tags != null)
             doc.Tags = string.IsNullOrWhiteSpace(request.Tags) ? null : request.Tags.Trim();
         if (request.DataClassification != null)
-            doc.DataClassification = request.DataClassification.Trim();
+            doc.DataClassification = DocumentDataClassifications.Normalize(request.DataClassification);
 
-        await _db.SaveChangesAsync(cancellationToken);
         await _audit.LogAsync("office.metadata", $"document:{id}", null, cancellationToken);
+        await _db.SaveChangesAsync(cancellationToken);
 
         return Ok(await ToDocumentResponseAsync(doc, cancellationToken));
     }
@@ -195,30 +234,49 @@ public sealed class OfficeController : ControllerBase
     {
         if (!User.TryGetUserId(out var userId))
             return Unauthorized();
-        var approverIds = request?.ApproverUserIds?.Where(x => x > 0).Distinct().ToList()
-            ?? (request?.ApproverUserId > 0 ? new List<int> { request.ApproverUserId } : new List<int>());
-        if (approverIds.Count == 0)
-            return BadRequest(new ErrorResponse { Message = "Укажите хотя бы одного согласующего." });
 
-        var doc = await LoadDocumentAsync(id, cancellationToken);
-        if (doc == null)
-            return NotFound();
-
-        if (doc.OwnerId != userId && doc.ResponsibleUserId != userId && !User.IsAdmin())
-            return Forbid();
-
-        try
+        const int maxAttempts = 2;
+        for (var attempt = 0; attempt < maxAttempts; attempt++)
         {
-            await _workflow.SubmitAsync(doc, userId, approverIds, request?.Comment, request?.ApprovalDueAt, cancellationToken);
-            await _db.SaveChangesAsync(cancellationToken);
-            await _audit.LogAsync("workflow.submit", $"document:{id}", $"approver={request.ApproverUserId}", cancellationToken);
-        }
-        catch (InvalidOperationException ex)
-        {
-            return BadRequest(new ErrorResponse { Message = ex.Message });
+            var doc = await LoadDocumentAsync(id, cancellationToken);
+            if (doc == null)
+                return NotFound();
+
+            if (doc.OwnerId != userId && doc.ResponsibleUserId != userId && !User.IsAdmin())
+                return Forbid();
+
+            try
+            {
+                if (doc.WorkflowStatus == DocumentWorkflowStatuses.Rejected)
+                {
+                    await _workflow.ResubmitAfterRevisionAsync(doc, userId, request?.Comment, cancellationToken);
+                    await _audit.LogAsync("workflow.resubmit", $"document:{id}", null, cancellationToken);
+                }
+                else
+                {
+                    var approverIds = request?.ApproverUserIds?.Where(x => x > 0).Distinct().ToList()
+                        ?? (request?.ApproverUserId > 0 ? new List<int> { request.ApproverUserId } : new List<int>());
+                    if (approverIds.Count == 0)
+                        return BadRequest(new ErrorResponse { Message = "Укажите хотя бы одного согласующего." });
+
+                    await _workflow.SubmitAsync(doc, userId, approverIds, request?.Comment, request?.ApprovalDueAt, cancellationToken);
+                    await _audit.LogAsync("workflow.submit", $"document:{id}", $"approver={request.ApproverUserId}", cancellationToken);
+                }
+
+                await _db.SaveChangesAsync(cancellationToken);
+                return Ok(await ToDocumentResponseAsync(doc, cancellationToken));
+            }
+            catch (InvalidOperationException ex)
+            {
+                return BadRequest(new ErrorResponse { Message = ex.Message });
+            }
+            catch (DbUpdateConcurrencyException) when (attempt < maxAttempts - 1)
+            {
+                _db.ChangeTracker.Clear();
+            }
         }
 
-        return Ok(await ToDocumentResponseAsync(doc, cancellationToken));
+        return Conflict(new ErrorResponse { Message = "Документ изменён другим пользователем. Обновите страницу и повторите действие." });
     }
 
     [HttpPost("documents/{id:int}/approve")]
@@ -231,24 +289,33 @@ public sealed class OfficeController : ControllerBase
         if (!User.TryGetUserId(out var userId))
             return Unauthorized();
 
-        var doc = await LoadDocumentAsync(id, cancellationToken);
-        if (doc == null)
-            return NotFound();
-        if (!await _access.CanApproveAsync(userId, doc, cancellationToken))
-            return Forbid();
-
-        try
+        const int maxAttempts = 2;
+        for (var attempt = 0; attempt < maxAttempts; attempt++)
         {
-            await _workflow.ApproveAsync(doc, userId, request?.Comment, cancellationToken);
-            await _db.SaveChangesAsync(cancellationToken);
-            await _audit.LogAsync("workflow.approve", $"document:{id}", null, cancellationToken);
-        }
-        catch (InvalidOperationException ex)
-        {
-            return BadRequest(new ErrorResponse { Message = ex.Message });
+            var doc = await LoadDocumentAsync(id, cancellationToken);
+            if (doc == null)
+                return NotFound();
+            if (!await _access.CanApproveAsync(userId, doc, cancellationToken))
+                return Forbid();
+
+            try
+            {
+                await _workflow.ApproveAsync(doc, userId, request?.Comment, cancellationToken);
+                await _audit.LogAsync("workflow.approve", $"document:{id}", null, cancellationToken);
+                await _db.SaveChangesAsync(cancellationToken);
+                return Ok(await ToDocumentResponseAsync(doc, cancellationToken));
+            }
+            catch (InvalidOperationException ex)
+            {
+                return BadRequest(new ErrorResponse { Message = ex.Message });
+            }
+            catch (DbUpdateConcurrencyException) when (attempt < maxAttempts - 1)
+            {
+                _db.ChangeTracker.Clear();
+            }
         }
 
-        return Ok(await ToDocumentResponseAsync(doc, cancellationToken));
+        return Conflict(new ErrorResponse { Message = "Документ изменён другим пользователем. Обновите страницу и повторите действие." });
     }
 
     [HttpPost("documents/{id:int}/reject")]
@@ -263,24 +330,33 @@ public sealed class OfficeController : ControllerBase
         if (request == null || string.IsNullOrWhiteSpace(request.Comment))
             return BadRequest(new ErrorResponse { Message = "Укажите комментарий при возврате." });
 
-        var doc = await LoadDocumentAsync(id, cancellationToken);
-        if (doc == null)
-            return NotFound();
-        if (!await _access.CanApproveAsync(userId, doc, cancellationToken))
-            return Forbid();
-
-        try
+        const int maxAttempts = 2;
+        for (var attempt = 0; attempt < maxAttempts; attempt++)
         {
-            await _workflow.RejectAsync(doc, userId, request.Comment, cancellationToken);
-            await _db.SaveChangesAsync(cancellationToken);
-            await _audit.LogAsync("workflow.reject", $"document:{id}", request.Comment, cancellationToken);
-        }
-        catch (InvalidOperationException ex)
-        {
-            return BadRequest(new ErrorResponse { Message = ex.Message });
+            var doc = await LoadDocumentAsync(id, cancellationToken);
+            if (doc == null)
+                return NotFound();
+            if (!await _access.CanApproveAsync(userId, doc, cancellationToken))
+                return Forbid();
+
+            try
+            {
+                await _workflow.RejectAsync(doc, userId, request.Comment, cancellationToken);
+                await _audit.LogAsync("workflow.reject", $"document:{id}", request.Comment, cancellationToken);
+                await _db.SaveChangesAsync(cancellationToken);
+                return Ok(await ToDocumentResponseAsync(doc, cancellationToken));
+            }
+            catch (InvalidOperationException ex)
+            {
+                return BadRequest(new ErrorResponse { Message = ex.Message });
+            }
+            catch (DbUpdateConcurrencyException) when (attempt < maxAttempts - 1)
+            {
+                _db.ChangeTracker.Clear();
+            }
         }
 
-        return Ok(await ToDocumentResponseAsync(doc, cancellationToken));
+        return Conflict(new ErrorResponse { Message = "Документ изменён другим пользователем. Обновите страницу и повторите действие." });
     }
 
     [HttpPost("documents/{id:int}/return-to-draft")]
@@ -304,6 +380,10 @@ public sealed class OfficeController : ControllerBase
         catch (InvalidOperationException ex)
         {
             return BadRequest(new ErrorResponse { Message = ex.Message });
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            return Conflict(new ErrorResponse { Message = "Документ изменён другим пользователем. Обновите страницу и повторите действие." });
         }
 
         return Ok(await ToDocumentResponseAsync(doc, cancellationToken));
@@ -330,6 +410,10 @@ public sealed class OfficeController : ControllerBase
         catch (InvalidOperationException ex)
         {
             return BadRequest(new ErrorResponse { Message = ex.Message });
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            return Conflict(new ErrorResponse { Message = "Документ изменён другим пользователем. Обновите страницу и повторите действие." });
         }
 
         return Ok(await ToDocumentResponseAsync(doc, cancellationToken));
@@ -368,6 +452,10 @@ public sealed class OfficeController : ControllerBase
         catch (InvalidOperationException ex)
         {
             return BadRequest(new ErrorResponse { Message = ex.Message });
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            return Conflict(new ErrorResponse { Message = "Документ изменён другим пользователем. Обновите страницу и повторите действие." });
         }
 
         return Ok(await ToDocumentResponseAsync(doc, cancellationToken));

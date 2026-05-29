@@ -86,7 +86,8 @@ public class PdfParserService : IPdfParserService
         }
 
         import ??= new DocumentImportContext();
-        var confidential = string.Equals(import.DataClassification, "Confidential", StringComparison.OrdinalIgnoreCase);
+        var classification = DocumentDataClassifications.Normalize(import.DataClassification);
+        var confidential = classification == DocumentDataClassifications.Confidential;
 
         string structuredJson;
         string aiSummary;
@@ -95,7 +96,7 @@ public class PdfParserService : IPdfParserService
             structuredJson = System.Text.Json.JsonSerializer.Serialize(new
             {
                 fileName = file.FileName,
-                dataClassification = import.DataClassification,
+                dataClassification = classification,
                 note = "Внешние LLM отключены политикой конфиденциальности."
             }, new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
             aiSummary = "Документ с грифом конфиденциальности: AI-описание и внешние сервисы не использовались.";
@@ -136,7 +137,7 @@ public class PdfParserService : IPdfParserService
             AiSummary = aiSummary,
             UploadedAt = DateTime.UtcNow,
             ProcessingProfile = string.IsNullOrWhiteSpace(import.ProcessingProfile) ? "general" : import.ProcessingProfile.Trim(),
-            DataClassification = string.IsNullOrWhiteSpace(import.DataClassification) ? "Internal" : import.DataClassification.Trim()
+            DataClassification = classification
         };
 
         if (ownerId.HasValue)
@@ -149,36 +150,39 @@ public class PdfParserService : IPdfParserService
             }
         }
 
-        _db.ParsedDocuments.Add(entity);
-        await _db.SaveChangesAsync(cancellationToken);
-
-        if (ownerId.HasValue)
+        await using var tx = await _db.Database.BeginTransactionAsync(cancellationToken);
+        try
         {
-            try
+            _db.ParsedDocuments.Add(entity);
+            await _db.SaveChangesAsync(cancellationToken);
+
+            if (ownerId.HasValue)
             {
                 memoryStream.Position = 0;
                 entity.OriginalStorageKey = await _fileStorage.SaveOriginalAsync(
                     entity.Id, file.FileName, memoryStream, cancellationToken);
-                await _db.SaveChangesAsync(cancellationToken);
             }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Не удалось сохранить оригинал файла {FileName}", file.FileName);
-            }
-        }
 
-        if (ownerId.HasValue && !string.IsNullOrWhiteSpace(entity.FullText))
-        {
-            _db.DocumentVersions.Add(new Models.DocumentVersion
+            if (ownerId.HasValue && !string.IsNullOrWhiteSpace(entity.FullText))
             {
-                DocumentId = entity.Id,
-                VersionNumber = 1,
-                Text = entity.FullText,
-                ChangeType = "import",
-                CreatedByUserId = ownerId,
-                CreatedAt = DateTime.UtcNow
-            });
+                _db.DocumentVersions.Add(new Models.DocumentVersion
+                {
+                    DocumentId = entity.Id,
+                    VersionNumber = 1,
+                    Text = entity.FullText,
+                    ChangeType = "import",
+                    CreatedByUserId = ownerId,
+                    CreatedAt = DateTime.UtcNow
+                });
+            }
+
             await _db.SaveChangesAsync(cancellationToken);
+            await tx.CommitAsync(cancellationToken);
+        }
+        catch
+        {
+            await tx.RollbackAsync(cancellationToken);
+            throw;
         }
 
         await _webhook.NotifyAsync("document.parsed", new

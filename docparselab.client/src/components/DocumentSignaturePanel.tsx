@@ -39,6 +39,7 @@ export function DocumentSignaturePanel({ token, document, onUpdated, onError }: 
   const [cadesState, setCadesState] = useState<CadesUiState>('idle');
   const [cadesCerts, setCadesCerts] = useState<CadesCertificateInfo[]>([]);
   const [cadesCertThumb, setCadesCertThumb] = useState('');
+  const [manualUploadOpen, setManualUploadOpen] = useState(false);
 
   const status = document.workflowStatus ?? 'Draft';
   const canUseExternal = document.canSign && (status === 'Approved' || status === 'Signed');
@@ -218,7 +219,7 @@ export function DocumentSignaturePanel({ token, document, onUpdated, onError }: 
 
           {canUseExternal && (
             <div className="signature-sign-form signature-cryptopro-form">
-              <h4>УКЭП — КриптоПро</h4>
+              <h4 className="signature-section-title">УКЭП — КриптоПро</h4>
               {cadesState === 'checking' && <p className="registry-meta">Проверка плагина КриптоПро…</p>}
               {cadesState === 'unavailable' && (
                 <p className="registry-meta signature-cryptopro-hint">
@@ -260,37 +261,74 @@ export function DocumentSignaturePanel({ token, document, onUpdated, onError }: 
                 </>
               )}
 
-              <details className="signature-manual-upload">
-                <summary>Загрузить готовый файл подписи (.sig / .p7s)</summary>
-                <div className="signature-manual-upload__body">
-                  <label className="parse-field">
-                    <span className="parse-field-label">Субъект сертификата</span>
-                    <input type="text" value={extSubject} onChange={(e) => setExtSubject(e.target.value)} disabled={busy} />
-                  </label>
-                  <label className="parse-field">
-                    <span className="parse-field-label">Отпечаток</span>
-                    <input type="text" value={extThumb} onChange={(e) => setExtThumb(e.target.value)} disabled={busy} />
-                  </label>
-                  <label className="parse-field">
-                    <span className="parse-field-label">Файл подписи</span>
-                    <input type="file" accept=".sig,.p7s,.p7m" onChange={(e) => setExtFile(e.target.files?.[0] ?? null)} />
-                  </label>
-                  <button
-                    type="button"
-                    className="btn-secondary office-sidebar-btn"
-                    disabled={busy}
-                    onClick={() => {
-                      const fd = new FormData();
-                      if (extSubject.trim()) fd.set('CertificateSubject', extSubject.trim());
-                      if (extThumb.trim()) fd.set('CertificateThumbprint', extThumb.trim());
-                      if (extFile) fd.set('signatureFile', extFile);
-                      void registerExternal(fd);
-                    }}
-                  >
-                    Зарегистрировать файл УКЭП
-                  </button>
-                </div>
-              </details>
+              <div className="signature-external-upload">
+                <button
+                  type="button"
+                  className="signature-external-upload__toggle"
+                  onClick={() => setManualUploadOpen((o) => !o)}
+                  aria-expanded={manualUploadOpen}
+                >
+                  <span>Загрузить готовый файл подписи (.sig / .p7s)</span>
+                  <span className="office-card-panel-chevron">{manualUploadOpen ? '▲' : '▼'}</span>
+                </button>
+                {manualUploadOpen && (
+                  <div className="signature-external-upload__body">
+                    <p className="signature-external-upload__hint">
+                      Если подпись уже создана вне браузера, укажите данные сертификата и прикрепите файл CMS.
+                    </p>
+                    <label className="parse-field">
+                      <span className="parse-field-label">Субъект сертификата</span>
+                      <input
+                        type="text"
+                        value={extSubject}
+                        onChange={(e) => setExtSubject(e.target.value)}
+                        disabled={busy}
+                        placeholder="CN=Иванов Иван, O=…"
+                      />
+                    </label>
+                    <label className="parse-field">
+                      <span className="parse-field-label">Отпечаток (необязательно)</span>
+                      <input
+                        type="text"
+                        value={extThumb}
+                        onChange={(e) => setExtThumb(e.target.value)}
+                        disabled={busy}
+                        placeholder="SHA1 отпечаток сертификата"
+                      />
+                    </label>
+                    <div className="parse-field">
+                      <span className="parse-field-label">Файл подписи</span>
+                      <label className={`batch-file-btn signature-file-btn${extFile ? ' has-file' : ''}`}>
+                        <input
+                          type="file"
+                          accept=".sig,.p7s,.p7m"
+                          disabled={busy}
+                          onChange={(e) => setExtFile(e.target.files?.[0] ?? null)}
+                        />
+                        {extFile ? extFile.name : 'Выбрать файл .sig / .p7s'}
+                      </label>
+                    </div>
+                    <button
+                      type="button"
+                      className="btn-primary office-sidebar-btn"
+                      disabled={busy || !extFile}
+                      onClick={() => {
+                        if (!extFile) {
+                          onError('Выберите файл подписи (.sig или .p7s).');
+                          return;
+                        }
+                        const fd = new FormData();
+                        if (extSubject.trim()) fd.set('CertificateSubject', extSubject.trim());
+                        if (extThumb.trim()) fd.set('CertificateThumbprint', extThumb.trim());
+                        fd.set('signatureFile', extFile);
+                        void registerExternal(fd);
+                      }}
+                    >
+                      {busy ? 'Регистрация…' : 'Зарегистрировать файл УКЭП'}
+                    </button>
+                  </div>
+                )}
+              </div>
             </div>
           )}
 

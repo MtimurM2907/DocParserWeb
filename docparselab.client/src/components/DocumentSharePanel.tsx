@@ -20,7 +20,12 @@ export function DocumentSharePanel({ token, document, currentUserId, onShared, o
 
   useEffect(() => {
     if (!expanded) return;
-    void fetchDocumentShares(token, document.id).then(setShares).catch(() => setShares([]));
+    void fetchDocumentShares(token, document.id)
+      .then(setShares)
+      .catch((e) => {
+        setShares([]);
+        onError(e instanceof Error ? e.message : 'Не удалось загрузить список доступов');
+      });
   }, [expanded, token, document.id, document.shareCount]);
 
   const isOwner = document.ownerId === currentUserId;
@@ -91,10 +96,12 @@ export function DocumentSharePanel({ token, document, currentUserId, onShared, o
                     className="btn-reject"
                     disabled={busy}
                     onClick={() => {
-                      void revokeDocumentShare(token, document.id, s.shareId).then(() => {
-                        setShares((prev) => prev.filter((x) => x.shareId !== s.shareId));
-                        onShared();
-                      });
+                      void revokeDocumentShare(token, document.id, s.shareId)
+                        .then(() => {
+                          setShares((prev) => prev.filter((x) => x.shareId !== s.shareId));
+                          onShared();
+                        })
+                        .catch((e) => onError(e instanceof Error ? e.message : 'Не удалось отозвать доступ'));
                     }}
                   >
                     Отозвать

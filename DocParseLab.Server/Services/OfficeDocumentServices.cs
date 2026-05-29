@@ -165,6 +165,11 @@ public interface IDocumentWorkflowService
         string? comment,
         DateTime? approvalDueAt = null,
         CancellationToken cancellationToken = default);
+    Task ResubmitAfterRevisionAsync(
+        ParsedDocument doc,
+        int authorUserId,
+        string? comment,
+        CancellationToken cancellationToken = default);
     Task ApproveAsync(ParsedDocument doc, int approverUserId, string? comment, CancellationToken cancellationToken = default);
     Task RejectAsync(ParsedDocument doc, int approverUserId, string comment, CancellationToken cancellationToken = default);
     Task ReturnToDraftAsync(ParsedDocument doc, int userId, CancellationToken cancellationToken = default);
@@ -191,17 +196,35 @@ public sealed class DocumentWorkflowService : IDocumentWorkflowService
         DateTime? approvalDueAt = null,
         CancellationToken cancellationToken = default)
     {
-        if (doc.WorkflowStatus is not (DocumentWorkflowStatuses.Draft or DocumentWorkflowStatuses.Rejected))
-            throw new InvalidOperationException("Отправить на согласование можно только черновик или отклонённый документ.");
+        if (doc.WorkflowStatus != DocumentWorkflowStatuses.Draft)
+            throw new InvalidOperationException("Назначить согласующих и отправить можно только из черновика.");
 
         var ids = approverUserIds.Where(id => id > 0).Distinct().ToList();
         if (ids.Count == 0)
             throw new InvalidOperationException("Укажите хотя бы одного согласующего.");
 
+        var submitter = await _db.Users.AsNoTracking()
+            .FirstOrDefaultAsync(u => u.Id == authorUserId, cancellationToken);
+        if (submitter == null)
+            throw new InvalidOperationException("Пользователь не найден.");
+
+        if (submitter.DepartmentId == null)
+            throw new InvalidOperationException(
+                "У вашей учётной записи не указано подразделение. Обратитесь к администратору.");
+
         foreach (var id in ids)
         {
-            if (!await _db.Users.AnyAsync(u => u.Id == id, cancellationToken))
+            var approver = await _db.Users.AsNoTracking()
+                .FirstOrDefaultAsync(u => u.Id == id, cancellationToken);
+            if (approver == null)
                 throw new InvalidOperationException($"Согласующий с id={id} не найден.");
+
+            if (!WorkflowApproverRules.CanBeApprover(approver, submitter))
+            {
+                var name = approver.DisplayName ?? approver.Email;
+                throw new InvalidOperationException(
+                    $"«{name}» не может быть согласующим. Доступны только сотрудники и руководители вашего подразделения (не вы, не администратор, не наблюдатель).");
+            }
         }
 
         var oldSteps = await _db.DocumentApprovalSteps.Where(s => s.DocumentId == doc.Id).ToListAsync(cancellationToken);
@@ -231,6 +254,55 @@ public sealed class DocumentWorkflowService : IDocumentWorkflowService
             ids[0],
             "Документ на согласовании",
             $"Вам направлен документ «{OfficeDtoMapper.DisplayTitle(doc)}» на согласование.",
+            doc.Id,
+            cancellationToken);
+    }
+
+    public async Task ResubmitAfterRevisionAsync(
+        ParsedDocument doc,
+        int authorUserId,
+        string? comment,
+        CancellationToken cancellationToken = default)
+    {
+        if (doc.WorkflowStatus != DocumentWorkflowStatuses.Rejected)
+            throw new InvalidOperationException("Повторная отправка доступна только для документа на доработке.");
+
+        var author = await _db.Users.AsNoTracking().FirstOrDefaultAsync(u => u.Id == authorUserId, cancellationToken);
+        if (author == null)
+            throw new InvalidOperationException("Пользователь не найден.");
+
+        if (author.Role != UserRoles.Admin
+            && doc.OwnerId != authorUserId
+            && doc.ResponsibleUserId != authorUserId)
+            throw new InvalidOperationException("Повторно отправить может владелец, ответственный или администратор.");
+
+        var steps = await _db.DocumentApprovalSteps
+            .Where(s => s.DocumentId == doc.Id)
+            .OrderBy(s => s.StepOrder)
+            .ToListAsync(cancellationToken);
+
+        if (steps.Count == 0)
+            throw new InvalidOperationException(
+                "Маршрут согласования не найден. Верните документ в черновик и отправьте на согласование заново.");
+
+        foreach (var step in steps)
+        {
+            step.Status = ApprovalStepStatuses.Pending;
+            step.Comment = null;
+            step.ActedAt = null;
+        }
+
+        doc.WorkflowStatus = DocumentWorkflowStatuses.OnApproval;
+        doc.CurrentApproverUserId = steps[0].ApproverUserId;
+        doc.WorkflowComment = comment;
+        doc.WorkflowCompletedAt = null;
+        doc.SubmittedAt = DateTime.UtcNow;
+
+        AddHistory(doc.Id, authorUserId, WorkflowActions.Resubmitted, comment);
+        await _notifications.NotifyUserAsync(
+            steps[0].ApproverUserId,
+            "Документ снова на согласовании",
+            $"Документ «{OfficeDtoMapper.DisplayTitle(doc)}» повторно направлен на согласование после доработки.",
             doc.Id,
             cancellationToken);
     }

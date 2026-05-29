@@ -242,6 +242,7 @@ dotnet run -- --seed-database
 | `admin@docparselab.local` | `Admin123!` | Администратор Системы | Admin |
 | `manager@docparselab.local` | `Manager123!` | Петров Пётр Петрович | Manager |
 | `ivanov@docparselab.local` | `Employee123!` | Иванов Иван Иванович | Employee |
+| `smirnov@docparselab.local` | `Manager123!` | Смирнов Андрей Викторович | Manager |
 | `sidorova@docparselab.local` | `Employee123!` | Сидорова Мария Сергеевна | Employee |
 | `viewer@docparselab.local` | `Viewer123!` | Козлов Алексей Николаевич | Viewer |
 

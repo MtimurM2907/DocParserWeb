@@ -3,7 +3,7 @@ import { fetchDocumentPageCount } from '../api/backend';
 import { DocumentOriginalViewer } from './DocumentOriginalViewer';
 import { getDocumentPageCount } from '../lib/documentPages';
 import { DocumentPagedView } from './DocumentPagedView';
-import { prepareDocLikeSource, renderDocLikeText } from './DocumentTextViews';
+import { renderDocLikeText } from './DocumentTextViews';
 
 export type DocumentTextViewMode = 'processed' | 'source';
 
@@ -75,9 +75,9 @@ function PagedTextView({
       searchQuery={searchQuery}
       activeSearchIndex={activeSearchIndex}
       onSearchIndexChange={onSearchIndexChange}
-      renderPage={(pageText) => (
+      renderPage={(pageText, pageSearchM, pageSearchIdx) => (
         <div className={`${className} doc-text-processed--reader`}>
-          {renderDocLikeText(prepareDocLikeSource(pageText))}
+          {renderDocLikeText(pageText, pageSearchM, pageSearchIdx)}
         </div>
       )}
     />

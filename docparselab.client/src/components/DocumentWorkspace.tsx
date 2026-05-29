@@ -1,6 +1,10 @@
 import type { ReactNode } from 'react';
 import type { ParsedDocument } from '../types/api';
-import { DATA_CLASSIFICATION_LABELS, DOCUMENT_TYPE_LABELS, WORKFLOW_STATUS_LABELS } from '../types/office';
+import {
+  classificationLabel,
+  DOCUMENT_TYPE_LABELS,
+  WORKFLOW_STATUS_LABELS,
+} from '../types/office';
 
 type Props = {
   document: ParsedDocument;
@@ -38,10 +42,7 @@ export function DocumentWorkspace({
   const statusLabel = status ? (WORKFLOW_STATUS_LABELS[status] ?? status) : null;
   const typeLabel =
     DOCUMENT_TYPE_LABELS[document.documentType ?? ''] ?? document.documentType ?? '—';
-  const classLabel =
-    DATA_CLASSIFICATION_LABELS[document.dataClassification ?? ''] ??
-    document.dataClassification ??
-    '—';
+  const classLabel = classificationLabel(document.dataClassification);
 
   return (
     <article className="doc-workspace">

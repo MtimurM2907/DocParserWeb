@@ -1,3 +1,5 @@
+using System.ComponentModel.DataAnnotations;
+
 namespace DocParseLab.Server.DTOs;
 
 public sealed class DepartmentResponse
@@ -66,11 +68,15 @@ public sealed class DocumentRegistryPageResponse
 
 public sealed class UpdateDocumentMetadataRequest
 {
+    [MaxLength(300)]
     public string? Title { get; set; }
+    [MaxLength(64)]
     public string? DocumentType { get; set; }
     public int? DepartmentId { get; set; }
     public int? ResponsibleUserId { get; set; }
+    [MaxLength(1000)]
     public string? Tags { get; set; }
+    [MaxLength(64)]
     public string? DataClassification { get; set; }
 }
 
@@ -78,12 +84,14 @@ public sealed class SubmitForApprovalRequest
 {
     public int ApproverUserId { get; set; }
     public List<int>? ApproverUserIds { get; set; }
+    [MaxLength(2000)]
     public string? Comment { get; set; }
     public DateTime? ApprovalDueAt { get; set; }
 }
 
 public sealed class WorkflowDecisionRequest
 {
+    [MaxLength(2000)]
     public string? Comment { get; set; }
 }
 
@@ -132,15 +140,21 @@ public sealed class ApprovalTaskResponse
 
 public sealed class UpdateUserRequest
 {
+    [Required, EmailAddress, MaxLength(256)]
     public string Email { get; set; } = string.Empty;
+    [Required, MaxLength(200)]
     public string DisplayName { get; set; } = string.Empty;
+    [Required, MaxLength(32)]
     public string Role { get; set; } = string.Empty;
+    [Range(1, int.MaxValue)]
     public int DepartmentId { get; set; }
+    [MinLength(6), MaxLength(200)]
     public string? Password { get; set; }
 }
 
 public sealed class SignDocumentRequest
 {
+    [MaxLength(2000)]
     public string? Comment { get; set; }
 }
 
@@ -180,6 +194,7 @@ public sealed class DocumentSigningPayloadResponse
 
 public sealed class CreateDepartmentRequest
 {
+    [Required, MaxLength(200)]
     public string Name { get; set; } = string.Empty;
 }
 
@@ -204,6 +219,7 @@ public sealed class DocumentCommentResponse
 
 public sealed class AddDocumentCommentRequest
 {
+    [Required, MaxLength(4000)]
     public string Text { get; set; } = string.Empty;
 }
 
@@ -259,7 +275,9 @@ public sealed class DocumentShareItemResponse
 
 public sealed class ChangePasswordRequest
 {
+    [Required, MinLength(6), MaxLength(200)]
     public string CurrentPassword { get; set; } = string.Empty;
+    [Required, MinLength(6), MaxLength(200)]
     public string NewPassword { get; set; } = string.Empty;
 }
 
@@ -274,7 +292,10 @@ public sealed class DocumentEditLockStatusResponse
 
 public sealed class ExternalSignRequest
 {
+    [MaxLength(500)]
     public string? CertificateSubject { get; set; }
+    [MaxLength(256)]
     public string? CertificateThumbprint { get; set; }
+    [MaxLength(2000)]
     public string? Comment { get; set; }
 }

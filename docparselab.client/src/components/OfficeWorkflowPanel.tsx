@@ -1,14 +1,17 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { ParsedDocument } from '../types/api';
-import type { UserBrief, WorkflowHistoryItem } from '../types/office';
+import type { ApprovalStep, UserBrief, WorkflowHistoryItem } from '../types/office';
 import { WORKFLOW_STATUS_LABELS } from '../types/office';
-import { AppMultiSelect } from './AppMultiSelect';
+import { ApproverPickerField } from './ApproverPickerField';
 import {
   approveDocument,
   archiveDocument,
-  fetchOfficeUsers,
+  fetchApprovalCandidates,
+  fetchApprovalSteps,
+  fetchCurrentUser,
   fetchWorkflowHistory,
   rejectDocument,
+  resubmitForApproval,
   returnDocumentToDraft,
   submitForApproval,
 } from '../api/office';
@@ -20,21 +23,30 @@ type Props = {
   onError: (msg: string) => void;
 };
 
-export function OfficeWorkflowPanel({ token, document, onUpdated, onError }: Props) {
-  const [users, setUsers] = useState<UserBrief[]>([]);
-  const [approverIds, setApproverIds] = useState<number[]>([]);
-  const [comment, setComment] = useState('');
+const STEP_STATUS_LABELS: Record<string, string> = {
+  Pending: 'Ожидает',
+  Approved: 'Согласован',
+  Rejected: 'Возвращён',
+};
 
-  const approverOptions = useMemo(
-    () => users.map((u) => ({ value: String(u.id), label: u.displayName || u.email })),
-    [users],
-  );
+export function OfficeWorkflowPanel({ token, document, onUpdated, onError }: Props) {
+  const [candidates, setCandidates] = useState<UserBrief[]>([]);
+  const [departmentName, setDepartmentName] = useState<string | null>(null);
+  const [approverIds, setApproverIds] = useState<number[]>([]);
+  const [approvalSteps, setApprovalSteps] = useState<ApprovalStep[]>([]);
+  const [comment, setComment] = useState('');
   const [rejectComment, setRejectComment] = useState('');
   const [history, setHistory] = useState<WorkflowHistoryItem[]>([]);
   const [busy, setBusy] = useState(false);
+  const busyRef = useRef(false);
 
   useEffect(() => {
-    void fetchOfficeUsers(token).then(setUsers).catch(() => setUsers([]));
+    void fetchCurrentUser(token)
+      .then((u) => setDepartmentName(u.departmentName ?? null))
+      .catch(() => setDepartmentName(null));
+    void fetchApprovalCandidates(token)
+      .then(setCandidates)
+      .catch(() => setCandidates([]));
   }, [token]);
 
   useEffect(() => {
@@ -43,7 +55,20 @@ export function OfficeWorkflowPanel({ token, document, onUpdated, onError }: Pro
       .catch(() => setHistory([]));
   }, [token, document.id, document.workflowStatus]);
 
+  useEffect(() => {
+    const status = document.workflowStatus ?? 'Draft';
+    if (status !== 'Rejected' && status !== 'OnApproval' && status !== 'Approved') {
+      setApprovalSteps([]);
+      return;
+    }
+    void fetchApprovalSteps(token, document.id)
+      .then(setApprovalSteps)
+      .catch(() => setApprovalSteps([]));
+  }, [token, document.id, document.workflowStatus]);
+
   const run = async (fn: () => Promise<ParsedDocument>) => {
+    if (busyRef.current) return;
+    busyRef.current = true;
     setBusy(true);
     onError('');
     try {
@@ -51,15 +76,21 @@ export function OfficeWorkflowPanel({ token, document, onUpdated, onError }: Pro
       onUpdated(updated);
       setComment('');
       setRejectComment('');
+      void fetchWorkflowHistory(token, document.id).then(setHistory).catch(() => setHistory([]));
+      if (updated.workflowStatus === 'OnApproval' || updated.workflowStatus === 'Approved' || updated.workflowStatus === 'Rejected') {
+        void fetchApprovalSteps(token, document.id).then(setApprovalSteps).catch(() => setApprovalSteps([]));
+      }
     } catch (e) {
       onError(e instanceof Error ? e.message : 'Ошибка операции');
     } finally {
+      busyRef.current = false;
       setBusy(false);
     }
   };
 
   const status = document.workflowStatus ?? 'Draft';
   const statusLabel = WORKFLOW_STATUS_LABELS[status] ?? status;
+  const hasApprovalRoute = approvalSteps.length > 0;
 
   return (
     <div className="office-sidebar-card office-workflow">
@@ -80,15 +111,17 @@ export function OfficeWorkflowPanel({ token, document, onUpdated, onError }: Pro
       </div>
 
       <div className="office-sidebar-card__body">
-        {(status === 'Draft' || status === 'Rejected') && (
+        {status === 'Draft' && (
           <div className="office-workflow-form">
             <label className="parse-field">
               <span className="parse-field-label">Согласующие (порядок этапов)</span>
-              <AppMultiSelect
-                values={approverIds.map(String)}
-                onChange={(ids) => setApproverIds(ids.map((id) => parseInt(id, 10)).filter((n) => !Number.isNaN(n)))}
-                options={approverOptions}
-                placeholder="Выберите согласующих"
+              <ApproverPickerField
+                token={token}
+                selectedIds={approverIds}
+                candidates={candidates}
+                departmentName={departmentName}
+                onChange={setApproverIds}
+                disabled={busy}
               />
             </label>
             <label className="parse-field">
@@ -101,7 +134,7 @@ export function OfficeWorkflowPanel({ token, document, onUpdated, onError }: Pro
               disabled={busy}
               onClick={() => {
                 if (approverIds.length === 0) {
-                  onError('Выберите хотя бы одного согласующего');
+                  onError('Выберите хотя бы одного согласующего из вашего подразделения');
                   return;
                 }
                 void run(() => submitForApproval(token, document.id, approverIds, comment || undefined));
@@ -112,8 +145,76 @@ export function OfficeWorkflowPanel({ token, document, onUpdated, onError }: Pro
           </div>
         )}
 
+        {status === 'Rejected' && (
+          <div className="office-workflow-form">
+            {hasApprovalRoute ? (
+              <div className="office-approval-route">
+                <span className="parse-field-label">Маршрут согласования (без изменений)</span>
+                <ol className="office-approval-route__list">
+                  {approvalSteps.map((step) => (
+                    <li key={step.stepOrder} className={`office-approval-route__item status-${step.status}`}>
+                      <span className="office-approval-route__order">{step.stepOrder}.</span>
+                      <span className="office-approval-route__name">
+                        {step.approverEmail ?? `ID ${step.approverUserId}`}
+                      </span>
+                      <span className="office-approval-route__status">
+                        {STEP_STATUS_LABELS[step.status] ?? step.status}
+                      </span>
+                    </li>
+                  ))}
+                </ol>
+                <p className="office-approval-route__hint">
+                  После доработки документ снова пойдёт по этой же цепочке согласующих.
+                </p>
+              </div>
+            ) : (
+              <p className="registry-meta">
+                Маршрут не найден. Верните документ в черновик и назначьте согласующих заново.
+              </p>
+            )}
+            <label className="parse-field">
+              <span className="parse-field-label">Комментарий к повторной отправке (необязательно)</span>
+              <input type="text" value={comment} onChange={(e) => setComment(e.target.value)} />
+            </label>
+            <button
+              type="button"
+              className="btn-primary office-sidebar-btn"
+              disabled={busy || !hasApprovalRoute}
+              onClick={() => void run(() => resubmitForApproval(token, document.id, comment || undefined))}
+            >
+              {busy ? 'Отправка…' : 'Повторно отправить на согласование'}
+            </button>
+          </div>
+        )}
+
         {document.canApprove && status === 'OnApproval' && (
           <div className="office-workflow-form">
+            {hasApprovalRoute && (
+              <div className="office-approval-route office-approval-route--compact">
+                <span className="parse-field-label">Этапы согласования</span>
+                <ol className="office-approval-route__list">
+                  {approvalSteps.map((step) => (
+                    <li
+                      key={step.stepOrder}
+                      className={`office-approval-route__item status-${step.status}${
+                        document.currentApproverEmail &&
+                        step.approverEmail === document.currentApproverEmail
+                          ? ' is-current'
+                          : ''
+                      }`}
+                    >
+                      <span className="office-approval-route__order">{step.stepOrder}.</span>
+                      <span className="office-approval-route__name">
+                        {step.approverEmail ?? `ID ${step.approverUserId}`}
+                      </span>
+                      <span className="office-approval-route__status">
+                        {STEP_STATUS_LABELS[step.status] ?? step.status}
+                      </span>
+                    </li>
+                  ))}
+                </ol>
+              </div>
+            )}
             <label className="parse-field">
               <span className="parse-field-label">Комментарий к согласованию</span>
               <input type="text" value={comment} onChange={(e) => setComment(e.target.value)} />

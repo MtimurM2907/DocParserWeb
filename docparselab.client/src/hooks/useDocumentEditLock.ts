@@ -11,13 +11,16 @@ export function useDocumentEditLock(
 ) {
   const [lock, setLock] = useState<DocumentEditLockStatus | null>(null);
   const hubRef = useRef<HubConnection | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     if (!token || documentId == null) return;
     try {
       setLock(await fetchEditLock(token, documentId));
-    } catch {
+      setError(null);
+    } catch (e) {
       setLock(null);
+      setError(e instanceof Error ? e.message : 'Не удалось получить состояние блокировки');
     }
   }, [token, documentId]);
 
@@ -30,9 +33,18 @@ export function useDocumentEditLock(
     const hub = createDocumentHubConnection(token);
     hubRef.current = hub;
     hub.on('lockChanged', (status: DocumentEditLockStatus) => setLock(status));
-    void hub.start().then(() => hub.invoke('JoinDocument', documentId));
+    void hub
+      .start()
+      .then(() => hub.invoke('JoinDocument', documentId))
+      .catch(() => {
+        setError('Не удалось подключить обновления блокировки документа');
+      });
     return () => {
-      void hub.invoke('LeaveDocument', documentId).finally(() => void hub.stop());
+      hubRef.current = null;
+      void hub
+        .invoke('LeaveDocument', documentId)
+        .catch(() => {})
+        .finally(() => void hub.stop());
     };
   }, [token, documentId]);
 
@@ -43,9 +55,16 @@ export function useDocumentEditLock(
       .then((s) => {
         if (!cancelled) setLock(s);
       })
-      .catch(() => {});
+      .catch((e) => {
+        if (!cancelled) setError(e instanceof Error ? e.message : 'Не удалось захватить блокировку');
+      });
     const interval = setInterval(() => {
-      void acquireEditLock(token, documentId).then(setLock).catch(() => {});
+      void acquireEditLock(token, documentId)
+        .then((status) => {
+          setLock(status);
+          setError(null);
+        })
+        .catch((e) => setError(e instanceof Error ? e.message : 'Не удалось продлить блокировку'));
     }, 120_000);
     return () => {
       cancelled = true;
@@ -54,5 +73,5 @@ export function useDocumentEditLock(
     };
   }, [token, documentId, editing]);
 
-  return { lock, refresh };
+  return { lock, refresh, error };
 }

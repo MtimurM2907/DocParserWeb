@@ -5,6 +5,7 @@ using Microsoft.Extensions.Options;
 using DocParseLab.Server.Data;
 using DocParseLab.Server.DTOs;
 using DocParseLab.Server.Extensions;
+using DocParseLab.Server.Models;
 using DocParseLab.Server.Services;
 
 namespace DocParseLab.Server.Controllers;
@@ -16,12 +17,14 @@ public sealed class AiController : ControllerBase
     private readonly IGigaChatClient _client;
     private readonly GigaChatOptions _gigaChatOptions;
     private readonly AppDbContext _db;
+    private readonly ILogger<AiController> _logger;
 
-    public AiController(IGigaChatClient client, IOptions<GigaChatOptions> gigaChatOptions, AppDbContext db)
+    public AiController(IGigaChatClient client, IOptions<GigaChatOptions> gigaChatOptions, AppDbContext db, ILogger<AiController> logger)
     {
         _client = client;
         _gigaChatOptions = gigaChatOptions.Value;
         _db = db;
+        _logger = logger;
     }
 
     [HttpGet("status")]
@@ -61,7 +64,8 @@ public sealed class AiController : ControllerBase
         if (string.IsNullOrWhiteSpace(text))
             return BadRequest(new ErrorResponse { Message = "В документе нет текста для описания." });
 
-        var confidential = string.Equals(doc.DataClassification, "Confidential", StringComparison.OrdinalIgnoreCase);
+        var confidential = DocumentDataClassifications.Normalize(doc.DataClassification)
+            == DocumentDataClassifications.Confidential;
         string summary;
         string source;
 
@@ -82,8 +86,9 @@ public sealed class AiController : ControllerBase
             }
             catch (Exception ex)
             {
+                _logger.LogWarning(ex, "GigaChat summary failed for document {DocumentId}, fallback to local summary", documentId);
                 summary = "[local-summary]\n" + DocumentSummaryBuilder.BuildLocalSummary(text, doc.FileName)
-                          + "\n\n(GigaChat: " + ex.Message + ")";
+                          + "\n\n(GigaChat временно недоступен)";
                 source = "local";
             }
         }

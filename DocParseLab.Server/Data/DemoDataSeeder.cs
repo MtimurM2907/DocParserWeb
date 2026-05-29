@@ -39,6 +39,7 @@ public static class DemoDataSeeder
             ("admin@docparselab.local", "Admin123!", "Администратор Системы", UserRoles.Admin, "Администрация"),
             ("manager@docparselab.local", "Manager123!", "Петров Пётр Петрович", UserRoles.Manager, "Бухгалтерия"),
             ("ivanov@docparselab.local", "Employee123!", "Иванов Иван Иванович", UserRoles.Employee, "Юридический отдел"),
+            ("smirnov@docparselab.local", "Manager123!", "Смирнов Андрей Викторович", UserRoles.Manager, "Юридический отдел"),
             ("sidorova@docparselab.local", "Employee123!", "Сидорова Мария Сергеевна", UserRoles.Employee, "Общий отдел"),
             ("viewer@docparselab.local", "Viewer123!", "Козлов Алексей Николаевич", UserRoles.Viewer, "Общий отдел"),
         };

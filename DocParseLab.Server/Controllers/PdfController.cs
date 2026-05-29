@@ -90,7 +90,7 @@ public class PdfController : ControllerBase
     {
         if (!ModelState.IsValid)
         {
-            return BadRequest("Некорректные данные запроса.");
+            return BadRequest(new ErrorResponse { Message = "Некорректные данные запроса." });
         }
 
         if (file == null || file.Length == 0)
@@ -130,7 +130,7 @@ public class PdfController : ControllerBase
                 new DocumentImportContext
                 {
                     ProcessingProfile = string.IsNullOrWhiteSpace(processingProfile) ? "general" : processingProfile!,
-                    DataClassification = string.IsNullOrWhiteSpace(dataClassification) ? "Internal" : dataClassification!
+                    DataClassification = DocumentDataClassifications.Normalize(dataClassification)
                 },
                 cancellationToken);
             
@@ -149,8 +149,7 @@ public class PdfController : ControllerBase
             _logger.LogError(ex, "Ошибка при парсинге PDF файла {FileName}", file.FileName);
             return StatusCode(StatusCodes.Status500InternalServerError, new ErrorResponse
             {
-                Message = "Ошибка при обработке файла",
-                Details = ex.Message
+                Message = "Ошибка при обработке файла"
             });
         }
     }
@@ -196,7 +195,7 @@ public class PdfController : ControllerBase
     {
         if (!ModelState.IsValid)
         {
-            return BadRequest("Некорректные данные запроса.");
+            return BadRequest(new ErrorResponse { Message = "Некорректные данные запроса." });
         }
 
         if (!User.TryGetUserId(out var currentUserId))
@@ -236,14 +235,6 @@ public class PdfController : ControllerBase
             return BadRequest("Нельзя отправить документ самому себе.");
         }
 
-        // Проверка на дублирование шары
-        var existingShare = await _db.DocumentShares
-            .AnyAsync(s => s.DocumentId == document.Id && s.ToUserId == targetUser.Id, cancellationToken);
-        if (existingShare)
-        {
-            return BadRequest("Доступ к этому документу уже предоставлен данному пользователю.");
-        }
-
         var share = new DocumentShare
         {
             DocumentId = document.Id,
@@ -253,7 +244,14 @@ public class PdfController : ControllerBase
         };
 
         _db.DocumentShares.Add(share);
-        await _db.SaveChangesAsync(cancellationToken);
+        try
+        {
+            await _db.SaveChangesAsync(cancellationToken);
+        }
+        catch (DbUpdateException)
+        {
+            return Conflict(new ErrorResponse { Message = "Доступ к этому документу уже предоставлен данному пользователю." });
+        }
 
         await _audit.LogAsync("document.share", $"document:{document.Id}", targetEmail, cancellationToken);
         await _webhook.NotifyAsync(
@@ -342,7 +340,7 @@ public class PdfController : ControllerBase
         }
         catch (InvalidOperationException ex)
         {
-            return BadRequest(ex.Message);
+            return BadRequest(new ErrorResponse { Message = ex.Message });
         }
         catch (SmtpException ex)
         {
@@ -430,7 +428,14 @@ public class PdfController : ControllerBase
             return NotFound();
 
         _db.DocumentShares.Remove(share);
-        await _db.SaveChangesAsync(cancellationToken);
+        try
+        {
+            await _db.SaveChangesAsync(cancellationToken);
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            return Conflict(new ErrorResponse { Message = "Документ изменён другим пользователем. Обновите страницу и повторите действие." });
+        }
         await _audit.LogAsync("document.share_revoke", $"document:{id}", $"share:{shareId}", cancellationToken);
         return NoContent();
     }

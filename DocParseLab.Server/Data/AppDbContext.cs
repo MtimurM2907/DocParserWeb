@@ -83,6 +83,9 @@ public class AppDbContext : DbContext
 
         modelBuilder.Entity<ParsedDocument>()
             .HasIndex(d => d.WorkflowStatus);
+        modelBuilder.Entity<ParsedDocument>()
+            .Property(d => d.RowVersion)
+            .IsRowVersion();
 
         modelBuilder.Entity<DocumentShare>()
             .HasOne(s => s.Document)
@@ -101,6 +104,9 @@ public class AppDbContext : DbContext
             .WithMany(u => u.ReceivedShares)
             .HasForeignKey(s => s.ToUserId)
             .OnDelete(DeleteBehavior.Restrict);
+        modelBuilder.Entity<DocumentShare>()
+            .HasIndex(s => new { s.DocumentId, s.ToUserId })
+            .IsUnique();
 
         modelBuilder.Entity<AuditLogEntry>()
             .HasOne(e => e.User)

@@ -11,12 +11,12 @@ public class ParsedDocument
 
     public string OriginalFileType { get; set; } = "pdf";
 
-    /// <summary>Тип документа в реестре: general, letter, memo, order, contract.</summary>
+    /// <summary>Тип документа в реестре: general, letter, memo, order, contract, instruction, regulation.</summary>
     public string DocumentType { get; set; } = DocumentTypes.General;
 
     public string ProcessingProfile { get; set; } = "general";
 
-    public string DataClassification { get; set; } = "Internal";
+    public string DataClassification { get; set; } = DocumentDataClassifications.Default;
 
     public string WorkflowStatus { get; set; } = DocumentWorkflowStatuses.Draft;
 
@@ -64,6 +64,7 @@ public class ParsedDocument
     public int? EditLockedByUserId { get; set; }
     public AppUser? EditLockedByUser { get; set; }
     public DateTime? EditLockExpiresAt { get; set; }
+    public byte[] RowVersion { get; set; } = Array.Empty<byte>();
 
     public ICollection<DocumentShare> Shares { get; set; } = new List<DocumentShare>();
     public ICollection<DocumentVersion> Versions { get; set; } = new List<DocumentVersion>();

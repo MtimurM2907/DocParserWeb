@@ -1,7 +1,11 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { ParsedDocument } from '../types/api';
 import type { Department, UserBrief } from '../types/office';
-import { DATA_CLASSIFICATION_LABELS, DOCUMENT_TYPE_LABELS } from '../types/office';
+import {
+  DATA_CLASSIFICATION_LABELS,
+  DEFAULT_DATA_CLASSIFICATION,
+  DOCUMENT_TYPE_LABELS,
+} from '../types/office';
 import { fetchDepartments, fetchOfficeUsers, updateDocumentMetadata } from '../api/office';
 import { AppSelect, optionsFromLabels } from './AppSelect';
 
@@ -20,7 +24,11 @@ export function DocumentMetadataPanel({ token, document, onUpdated, onError }: P
     document.responsibleUserId != null ? String(document.responsibleUserId) : '',
   );
   const [tags, setTags] = useState(document.tags ?? '');
-  const [dataClassification, setDataClassification] = useState(document.dataClassification ?? 'Internal');
+  const [dataClassification, setDataClassification] = useState(
+    document.dataClassification === 'Confidential'
+      ? 'Confidential'
+      : DEFAULT_DATA_CLASSIFICATION,
+  );
   const [departments, setDepartments] = useState<Department[]>([]);
   const [users, setUsers] = useState<UserBrief[]>([]);
   const [busy, setBusy] = useState(false);
@@ -34,7 +42,9 @@ export function DocumentMetadataPanel({ token, document, onUpdated, onError }: P
     setDepartmentId(document.departmentId != null ? String(document.departmentId) : '');
     setResponsibleUserId(document.responsibleUserId != null ? String(document.responsibleUserId) : '');
     setTags(document.tags ?? '');
-    setDataClassification(document.dataClassification ?? 'Internal');
+    setDataClassification(
+      document.dataClassification === 'Confidential' ? 'Confidential' : DEFAULT_DATA_CLASSIFICATION,
+    );
   }, [document.id, document.title, document.fileName, document.documentType, document.departmentId, document.responsibleUserId, document.tags, document.dataClassification]);
 
   useEffect(() => {
