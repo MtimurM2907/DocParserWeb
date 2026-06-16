@@ -219,7 +219,8 @@ public sealed class OfficeController : ControllerBase
         if (request.DataClassification != null)
             doc.DataClassification = DocumentDataClassifications.Normalize(request.DataClassification);
 
-        await _audit.LogAsync("office.metadata", $"document:{id}", null, cancellationToken);
+        var metaDetails = BuildMetadataAuditDetails(doc);
+        await _audit.LogAsync("office.metadata", $"document:{id}", metaDetails, cancellationToken);
         await _db.SaveChangesAsync(cancellationToken);
 
         return Ok(await ToDocumentResponseAsync(doc, cancellationToken));
@@ -250,7 +251,11 @@ public sealed class OfficeController : ControllerBase
                 if (doc.WorkflowStatus == DocumentWorkflowStatuses.Rejected)
                 {
                     await _workflow.ResubmitAfterRevisionAsync(doc, userId, request?.Comment, cancellationToken);
-                    await _audit.LogAsync("workflow.resubmit", $"document:{id}", null, cancellationToken);
+                    await _audit.LogAsync(
+                        "workflow.resubmit",
+                        $"document:{id}",
+                        FormatAuditComment(request?.Comment, $"status={doc.WorkflowStatus}"),
+                        cancellationToken);
                 }
                 else
                 {
@@ -260,7 +265,11 @@ public sealed class OfficeController : ControllerBase
                         return BadRequest(new ErrorResponse { Message = "Укажите хотя бы одного согласующего." });
 
                     await _workflow.SubmitAsync(doc, userId, approverIds, request?.Comment, request?.ApprovalDueAt, cancellationToken);
-                    await _audit.LogAsync("workflow.submit", $"document:{id}", $"approver={request.ApproverUserId}", cancellationToken);
+                    await _audit.LogAsync(
+                        "workflow.submit",
+                        $"document:{id}",
+                        $"approvers=[{string.Join(',', approverIds)}]{FormatAuditCommentSuffix(request?.Comment)}",
+                        cancellationToken);
                 }
 
                 await _db.SaveChangesAsync(cancellationToken);
@@ -301,7 +310,11 @@ public sealed class OfficeController : ControllerBase
             try
             {
                 await _workflow.ApproveAsync(doc, userId, request?.Comment, cancellationToken);
-                await _audit.LogAsync("workflow.approve", $"document:{id}", null, cancellationToken);
+                await _audit.LogAsync(
+                    "workflow.approve",
+                    $"document:{id}",
+                    FormatAuditComment(request?.Comment, $"status={doc.WorkflowStatus}"),
+                    cancellationToken);
                 await _db.SaveChangesAsync(cancellationToken);
                 return Ok(await ToDocumentResponseAsync(doc, cancellationToken));
             }
@@ -342,7 +355,11 @@ public sealed class OfficeController : ControllerBase
             try
             {
                 await _workflow.RejectAsync(doc, userId, request.Comment, cancellationToken);
-                await _audit.LogAsync("workflow.reject", $"document:{id}", request.Comment, cancellationToken);
+                await _audit.LogAsync(
+                    "workflow.reject",
+                    $"document:{id}",
+                    FormatAuditComment(request.Comment, $"status={doc.WorkflowStatus}"),
+                    cancellationToken);
                 await _db.SaveChangesAsync(cancellationToken);
                 return Ok(await ToDocumentResponseAsync(doc, cancellationToken));
             }
@@ -375,6 +392,7 @@ public sealed class OfficeController : ControllerBase
         try
         {
             await _workflow.ReturnToDraftAsync(doc, userId, cancellationToken);
+            await _audit.LogAsync("workflow.return_to_draft", $"document:{id}", $"status={doc.WorkflowStatus}", cancellationToken);
             await _db.SaveChangesAsync(cancellationToken);
         }
         catch (InvalidOperationException ex)
@@ -405,6 +423,7 @@ public sealed class OfficeController : ControllerBase
         try
         {
             await _workflow.ArchiveAsync(doc, userId, cancellationToken);
+            await _audit.LogAsync("workflow.archive", $"document:{id}", $"title={doc.Title ?? doc.FileName}", cancellationToken);
             await _db.SaveChangesAsync(cancellationToken);
         }
         catch (InvalidOperationException ex)
@@ -443,10 +462,11 @@ public sealed class OfficeController : ControllerBase
         {
             await _signatures.SignAsync(doc, user, request?.Comment, cancellationToken);
             await _db.SaveChangesAsync(cancellationToken);
+            var hash = _signatures.ComputeTextHash(_signatures.GetCanonicalText(doc));
             await _audit.LogAsync(
                 "document.sign",
                 $"document:{id}",
-                $"hash={_signatures.ComputeTextHash(_signatures.GetCanonicalText(doc))}",
+                FormatAuditComment(request?.Comment, $"hash={hash[..Math.Min(16, hash.Length)]}…"),
                 cancellationToken);
         }
         catch (InvalidOperationException ex)
@@ -836,6 +856,37 @@ public sealed class OfficeController : ControllerBase
         CertificateThumbprint = s.CertificateThumbprint,
         ExternalCryptoVerified = s.ExternalCryptoVerified,
     };
+
+    private static string? BuildMetadataAuditDetails(ParsedDocument doc)
+    {
+        var parts = new List<string>();
+        if (!string.IsNullOrWhiteSpace(doc.Title))
+            parts.Add($"title={doc.Title}");
+        if (!string.IsNullOrWhiteSpace(doc.DocumentType))
+            parts.Add($"type={doc.DocumentType}");
+        if (doc.DepartmentId.HasValue)
+            parts.Add($"departmentId={doc.DepartmentId}");
+        if (doc.ResponsibleUserId.HasValue)
+            parts.Add($"responsibleId={doc.ResponsibleUserId}");
+        if (!string.IsNullOrWhiteSpace(doc.Tags))
+            parts.Add($"tags={doc.Tags}");
+        if (!string.IsNullOrWhiteSpace(doc.DataClassification))
+            parts.Add($"classification={doc.DataClassification}");
+        return parts.Count == 0 ? null : string.Join("; ", parts);
+    }
+
+    private static string? FormatAuditComment(string? comment, string? suffix = null)
+    {
+        var parts = new List<string>();
+        if (!string.IsNullOrWhiteSpace(comment))
+            parts.Add($"comment={comment.Trim()}");
+        if (!string.IsNullOrWhiteSpace(suffix))
+            parts.Add(suffix);
+        return parts.Count == 0 ? null : string.Join("; ", parts);
+    }
+
+    private static string FormatAuditCommentSuffix(string? comment) =>
+        string.IsNullOrWhiteSpace(comment) ? string.Empty : $"; comment={comment.Trim()}";
 
     private static CurrentUserResponse ToCurrentUser(AppUser user) => new()
     {

@@ -889,6 +889,26 @@ button.approver-picker-modal__row {
   box-shadow: none;
 }
 
+button.audit-sort-btn {
+  padding: 0;
+  background: none !important;
+  color: inherit;
+  box-shadow: none;
+  border: none;
+  font-weight: 600;
+}
+
+button.audit-sort-btn:not(:disabled):hover {
+  background: none !important;
+  color: var(--primary);
+  transform: none;
+  box-shadow: none;
+}
+
+button.audit-sort-btn--active {
+  color: var(--primary);
+}
+
 button.app-select__trigger {
   padding: 8px 11px;
   background: var(--surface) !important;
@@ -931,7 +951,7 @@ button:not(:disabled):not(.btn-primary):not(.btn-secondary):not(.btn-ghost):not(
     .notifications-list__item
   ):not(.user-header-menu__action):not(.office-card-panel-toggle):not(.signature-external-upload__toggle):not(
     .approver-picker-modal__row
-  ):not(.editor-nav-btn):not(.version-preview-modal__close):hover {
+  ):not(.audit-sort-btn):not(.editor-nav-btn):not(.version-preview-modal__close):hover {
   background: var(--gradient-btn-hover);
   transform: translateY(-1px);
   box-shadow: 0 6px 18px var(--primary-glow);
@@ -1507,6 +1527,11 @@ button:not(:disabled):not(.btn-primary):not(.btn-secondary):not(.btn-ghost):not(
   overflow: visible;
 }
 
+.document-paged__body {
+  overflow: auto;
+  max-height: min(68vh, 720px);
+}
+
 .doc-like-view {
   font-family: 'Times New Roman', Times, Georgia, serif;
   font-size: 1.12rem;
@@ -1989,6 +2014,64 @@ button.spell-suggestion:not(:disabled):hover {
 
 .office-audit {
   margin-top: 24px;
+}
+
+.audit-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.audit-filters__search {
+  flex: 1 1 220px;
+  min-width: 200px;
+  margin: 0;
+}
+
+.audit-filters__action {
+  flex: 0 1 220px;
+  min-width: 180px;
+}
+
+.audit-filters__reset {
+  margin-bottom: 2px;
+}
+
+.audit-summary {
+  margin: 0 0 10px;
+}
+
+.audit-sort-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  cursor: pointer;
+}
+
+.audit-action-code {
+  font-size: 0.85rem;
+}
+
+.audit-cell-details {
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.82rem;
+  color: var(--text-secondary);
+}
+
+.audit-cell-resource,
+.audit-cell-ip {
+  font-size: 0.82rem;
+  color: var(--text-secondary);
+}
+
+.audit-cell-time {
+  white-space: nowrap;
+  font-size: 0.82rem;
 }
 
 .modal-label {

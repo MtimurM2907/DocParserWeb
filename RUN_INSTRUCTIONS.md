@@ -252,6 +252,108 @@ dotnet run -- --seed-database
 
 ---
 
+## Резервная копия и перенос БД на другой ПК
+
+База данных **не входит** в папку проекта — она хранится в **PostgreSQL** на компьютере. При переносе приложения нужно отдельно сохранить дамп БД и (по желанию) загруженные файлы.
+
+### Что копировать на новый ПК
+
+| Что | Где |
+|-----|-----|
+| Код приложения | папка `DocParserWeb` |
+| Дамп PostgreSQL | `backups/*.dump` (см. ниже) |
+| Оригиналы PDF/DOCX | `DocParseLab.Server/Data/uploads/` |
+| Секреты | `gigachat.secrets.json`, настройки в `appsettings.json` |
+
+Папки `bin/`, `obj/`, `node_modules/` переносить не обязательно — на новом ПК соберите проект заново.
+
+### Шаг 1. Создание дампа (старый ПК)
+
+1. Убедитесь, что служба PostgreSQL **запущена** (Диспетчер задач → Службы → `postgresql-x64-…`).
+2. Остановите сервер DocParseLab (чтобы не было блокировок при копировании `Data/uploads`).
+3. В PowerShell из **корня проекта**:
+
+```powershell
+# Путь к pg_dump — подставьте свой (часто PostgreSQL 17):
+#   C:\Program Files\PostgreSQL\17\bin\pg_dump.exe
+#   или D:\Program Files (x86)\PosterSQL\bin\pg_dump.exe
+$pgDump = "D:\Program Files (x86)\PosterSQL\bin\pg_dump.exe"
+
+New-Item -ItemType Directory -Force -Path .\backups | Out-Null
+$outFile = ".\backups\pdf_parser_db_$(Get-Date -Format 'yyyyMMdd_HHmmss').dump"
+
+$env:PGPASSWORD = "1234"   # пароль из ConnectionStrings в appsettings.json
+& $pgDump -h localhost -p 5432 -U postgres -F c -f $outFile pdf_parser_db
+```
+
+Параметры из `appsettings.json`: база **`pdf_parser_db`**, пользователь **`postgres`**, порт **`5432`**.
+
+Успешный дамп — файл `.dump` в папке `backups/` (обычно десятки–сотни КБ и больше, если много документов).
+
+**Актуальный дамп в этом проекте:** `backups/pdf_parser_db_20260615_225818.dump` (создан автоматически).
+
+### Шаг 2. Подготовка нового ПК
+
+1. Установите **PostgreSQL 12+** и **.NET 8**.
+2. Создайте пустую базу (pgAdmin или psql):
+
+```sql
+CREATE DATABASE pdf_parser_db;
+```
+
+3. Распакуйте папку `DocParserWeb`.
+4. Скопируйте дамп в `backups/` и папку `DocParseLab.Server/Data/uploads/` (если нужны оригиналы файлов).
+
+### Шаг 3. Восстановление дампа (новый ПК)
+
+```powershell
+$pgRestore = "C:\Program Files\PostgreSQL\17\bin\pg_restore.exe"   # свой путь
+$dumpFile  = ".\backups\pdf_parser_db_20260615_225818.dump"        # ваш файл
+
+$env:PGPASSWORD = "ВАШ_ПАРОЛЬ_POSTGRES"
+& $pgRestore -h localhost -p 5432 -U postgres -d pdf_parser_db --clean --if-exists $dumpFile
+```
+
+- **`--clean --if-exists`** — перед восстановлением удаляет старые объекты в целевой БД (удобно при повторном импорте).
+- Если база только что создана и пустая, предупреждения pg_restore про «объект не существует» при `--clean` — **нормальны**.
+
+Проверка (psql или pgAdmin):
+
+```sql
+SELECT COUNT(*) FROM "Users";
+SELECT COUNT(*) FROM "ParsedDocuments";
+```
+
+### Шаг 4. Запуск приложения
+
+1. В `DocParseLab.Server/appsettings.json` укажите строку подключения к PostgreSQL **на новом ПК**:
+
+```json
+"DefaultConnection": "Host=localhost;Port=5432;Database=pdf_parser_db;Username=postgres;Password=ВАШ_ПАРОЛЬ"
+```
+
+2. Скопируйте `gigachat.secrets.json`, если использовали GigaChat.
+3. Запустите сервер:
+
+```powershell
+cd DocParseLab.Server
+dotnet run
+```
+
+Миграции вручную обычно **не нужны** — полный дамп уже содержит схему и данные. При старте на пустой БД без дампа EF применит миграции сам.
+
+### Если pg_dump / pg_restore не находятся
+
+Найдите каталог установки PostgreSQL:
+
+```powershell
+(Get-CimInstance Win32_Service -Filter "Name LIKE 'postgresql%'" | Select-Object -First 1).PathName
+```
+
+Рядом с `pg_ctl.exe` в подпапке `bin` лежат `pg_dump.exe` и `pg_restore.exe`.
+
+---
+
 ## Устранение неполадок
 
 | Проблема | Что проверить |

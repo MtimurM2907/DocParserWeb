@@ -508,7 +508,8 @@
 }
 
 .document-paged__body {
-  overflow: visible;
+  overflow: auto;
+  max-height: min(68vh, 720px);
 }
 
 .document-paged .document-paged__body .text-output,

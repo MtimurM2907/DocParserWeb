@@ -49,7 +49,7 @@ internal static class PdfTextPostProcessor
 
             {
 
-                lines[i] = RussianSpellcheckHomoglyphs.MapLatinHomoglyphs(line, includeULikeMappings: true);
+                lines[i] = RussianSpellcheckHomoglyphs.MapHomoglyphsInMixedLine(line);
 
             }
 

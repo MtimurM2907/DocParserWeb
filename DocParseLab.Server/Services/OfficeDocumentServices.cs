@@ -107,10 +107,12 @@ public sealed class DocumentAccessService : IDocumentAccessService
         if (user.Role == UserRoles.Viewer)
         {
             return q.Where(d =>
-                user.DepartmentId != null
-                && d.DepartmentId == user.DepartmentId
-                && (d.WorkflowStatus == DocumentWorkflowStatuses.Approved
-                    || d.WorkflowStatus == DocumentWorkflowStatuses.Archived));
+                d.Shares.Any(s => s.ToUserId == userId)
+                || (user.DepartmentId != null
+                    && d.DepartmentId == user.DepartmentId
+                    && (d.WorkflowStatus == DocumentWorkflowStatuses.Approved
+                        || d.WorkflowStatus == DocumentWorkflowStatuses.Signed
+                        || d.WorkflowStatus == DocumentWorkflowStatuses.Archived)));
         }
 
         return q.Where(d =>
@@ -314,11 +316,14 @@ public sealed class DocumentWorkflowService : IDocumentWorkflowService
         if (doc.CurrentApproverUserId != approverUserId)
             throw new InvalidOperationException("Вы не назначены согласующим по этому документу.");
 
-        var step = await _db.DocumentApprovalSteps
-            .FirstOrDefaultAsync(s =>
-                s.DocumentId == doc.Id
-                && s.ApproverUserId == approverUserId
-                && s.Status == ApprovalStepStatuses.Pending, cancellationToken);
+        var steps = await _db.DocumentApprovalSteps
+            .Where(s => s.DocumentId == doc.Id)
+            .OrderBy(s => s.StepOrder)
+            .ToListAsync(cancellationToken);
+
+        var step = steps.FirstOrDefault(s =>
+            s.ApproverUserId == approverUserId
+            && s.Status == ApprovalStepStatuses.Pending);
         if (step != null)
         {
             step.Status = ApprovalStepStatuses.Approved;
@@ -326,10 +331,12 @@ public sealed class DocumentWorkflowService : IDocumentWorkflowService
             step.ActedAt = DateTime.UtcNow;
         }
 
-        var next = await _db.DocumentApprovalSteps
-            .Where(s => s.DocumentId == doc.Id && s.Status == ApprovalStepStatuses.Pending)
+        // Ищем следующий этап в памяти: повторный запрос к БД до SaveChanges
+        // вернёт только что согласованный шаг как Pending (типичный случай — 1 согласующий).
+        var next = steps
+            .Where(s => s.Status == ApprovalStepStatuses.Pending)
             .OrderBy(s => s.StepOrder)
-            .FirstOrDefaultAsync(cancellationToken);
+            .FirstOrDefault();
 
         if (next != null)
         {

@@ -49,6 +49,7 @@ _build_out/
 ## Frontend build output copied into backend (generated)
 DocParseLab.Server/wwwroot/
 DocParseLab.Server/Data/uploads/
+backups/
 
 ## Environment variables
 .env

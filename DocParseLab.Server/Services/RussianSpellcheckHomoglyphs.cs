@@ -153,6 +153,43 @@ internal static class RussianSpellcheckHomoglyphs
         return new string(buffer);
     }
 
+    /// <summary>Замена гомоглифов только в смешанных токенах; чистая латиница (PDF, React) не трогается.</summary>
+    public static string MapHomoglyphsInMixedLine(string line)
+    {
+        if (string.IsNullOrEmpty(line)) return line;
+
+        var result = new System.Text.StringBuilder(line.Length);
+        var i = 0;
+        while (i < line.Length)
+        {
+            if (char.IsLetter(line[i]))
+            {
+                var start = i;
+                while (i < line.Length && (char.IsLetter(line[i]) || line[i] is '-' or '\'' or '’' or '.'))
+                {
+                    i++;
+                }
+
+                var token = line[start..i];
+                if (HasLatinLetters(token) && HasCyrillicLetters(token))
+                {
+                    result.Append(MapLatinCharsInMixedToken(token, includeULikeMappings: true));
+                }
+                else
+                {
+                    result.Append(token);
+                }
+            }
+            else
+            {
+                result.Append(line[i]);
+                i++;
+            }
+        }
+
+        return result.ToString();
+    }
+
     public static char MapLatinHomoglyphToCyrillic(char ch, bool includeULikeMappings)
     {
         if (includeULikeMappings)

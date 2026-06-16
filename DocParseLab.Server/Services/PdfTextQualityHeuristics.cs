@@ -40,12 +40,12 @@ internal static class PdfTextQualityHeuristics
 
         if (letters < 12) return true;
 
-        var latinInCyrillicDoc = cyrillic > 30 && latin > 0 && latin >= cyrillic * 0.06;
+        // Смесь кириллицы и латиницы в технических документах (PDF, React, API) — норма, не повод для OCR.
         var symbolNoise = suspiciousSymbols >= Math.Max(2, letters / 50);
         var mixedCaseChaos = HasChaoticCyrillicCasing(s);
-        var garbageTokens = CountGarbageTokens(s) >= Math.Max(1, letters / 100);
+        var garbageTokens = CountGarbageTokens(s) >= Math.Max(2, letters / 80);
 
-        return latinInCyrillicDoc || symbolNoise || mixedCaseChaos || garbageTokens;
+        return symbolNoise || mixedCaseChaos || garbageTokens;
     }
 
     public static double Score(string? text)

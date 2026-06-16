@@ -35,6 +35,11 @@ internal static class RussianOcrSpellCorrector
             var raw = match.Value;
             if (raw.Length < 4) continue;
             if (EducationalCode.IsMatch(raw)) continue;
+            if (RussianSpellcheckHomoglyphs.IsLatinLettersOnly(
+                    RussianSpellcheckHomoglyphs.StripInvisibleCharacters(raw)))
+            {
+                continue;
+            }
 
             if (TryAutoCorrect(raw, text, match.Index, wordList, out var corrected)
                 && !string.Equals(raw, corrected, StringComparison.Ordinal))

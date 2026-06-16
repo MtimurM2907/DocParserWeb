@@ -98,12 +98,17 @@ public sealed class PdfTextExtractor : IDocumentTextExtractor
             bestScore = RankExtractedText(pigFormatted);
         }
 
-        var needsOcr = _options.Enabled &&
-            (isScannedPdf
-                || string.IsNullOrWhiteSpace(pigFormatted)
-                || PdfTextQualityHeuristics.IsSuspicious(pigFormatted)
-                || PdfTextLayoutHeuristics.HasWeakTableLayout(pigFormatted)
-                || pigPlain.Trim().Length < _options.MinTextCharsToSkipOcr);
+        var nativeChars = pigPlain.Trim().Length;
+        var hasNativeLayer = !string.IsNullOrWhiteSpace(pigFormatted)
+            && nativeChars >= _options.MinTextCharsToSkipOcr;
+
+        var needsOcr = _options.Enabled && (
+            isScannedPdf
+            || string.IsNullOrWhiteSpace(pigFormatted)
+            || nativeChars < _options.MinTextCharsToSkipOcr
+            || (_options.OcrOnSuspiciousTextLayer && hasNativeLayer && (
+                PdfTextQualityHeuristics.IsSuspicious(pigFormatted)
+                || PdfTextLayoutHeuristics.HasWeakTableLayout(pigFormatted))));
 
         if (needsOcr)
         {

@@ -139,12 +139,17 @@ public class EnterpriseController : ControllerBase
 
     [HttpGet("audit")]
     [Authorize]
-    [ProducesResponseType(typeof(List<AuditLogEntryResponse>), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(AuditLogListResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ErrorResponse), StatusCodes.Status403Forbidden)]
-    public async Task<ActionResult<List<AuditLogEntryResponse>>> GetMyAudit(
+    public async Task<ActionResult<AuditLogListResponse>> GetMyAudit(
         CancellationToken cancellationToken,
-        [FromQuery] int take = 100,
-        [FromQuery] bool all = false)
+        [FromQuery] int take = 200,
+        [FromQuery] int skip = 0,
+        [FromQuery] bool all = false,
+        [FromQuery] string? search = null,
+        [FromQuery] string? action = null,
+        [FromQuery] string sortBy = "createdAt",
+        [FromQuery] bool sortDesc = true)
     {
         if (!User.TryGetUserId(out var userId))
             return Unauthorized();
@@ -158,12 +163,48 @@ public class EnterpriseController : ControllerBase
         }
 
         take = Math.Clamp(take, 1, 500);
-        var q = _db.AuditLogEntries.AsQueryable();
+        skip = Math.Max(0, skip);
+
+        var q = _db.AuditLogEntries.AsNoTracking().AsQueryable();
         if (!all)
             q = q.Where(a => a.UserId == userId);
 
+        if (!string.IsNullOrWhiteSpace(action))
+        {
+            var actionFilter = action.Trim();
+            q = q.Where(a => a.Action == actionFilter);
+        }
+
+        if (!string.IsNullOrWhiteSpace(search))
+        {
+            var term = $"%{search.Trim()}%";
+            q = q.Where(a =>
+                EF.Functions.ILike(a.Action, term)
+                || (a.Resource != null && EF.Functions.ILike(a.Resource, term))
+                || (a.Details != null && EF.Functions.ILike(a.Details, term))
+                || (a.UserEmailSnapshot != null && EF.Functions.ILike(a.UserEmailSnapshot, term)));
+        }
+
+        var totalCount = await q.CountAsync(cancellationToken);
+
+        q = (sortBy?.Trim().ToLowerInvariant()) switch
+        {
+            "user" => sortDesc
+                ? q.OrderByDescending(a => a.UserEmailSnapshot).ThenByDescending(a => a.Id)
+                : q.OrderBy(a => a.UserEmailSnapshot).ThenBy(a => a.Id),
+            "action" => sortDesc
+                ? q.OrderByDescending(a => a.Action).ThenByDescending(a => a.Id)
+                : q.OrderBy(a => a.Action).ThenBy(a => a.Id),
+            "resource" => sortDesc
+                ? q.OrderByDescending(a => a.Resource).ThenByDescending(a => a.Id)
+                : q.OrderBy(a => a.Resource).ThenBy(a => a.Id),
+            _ => sortDesc
+                ? q.OrderByDescending(a => a.CreatedAt).ThenByDescending(a => a.Id)
+                : q.OrderBy(a => a.CreatedAt).ThenBy(a => a.Id),
+        };
+
         var list = await q
-            .OrderByDescending(a => a.CreatedAt)
+            .Skip(skip)
             .Take(take)
             .Select(a => new AuditLogEntryResponse
             {
@@ -178,7 +219,11 @@ public class EnterpriseController : ControllerBase
             })
             .ToListAsync(cancellationToken);
 
-        return Ok(list);
+        return Ok(new AuditLogListResponse
+        {
+            Items = list,
+            TotalCount = totalCount,
+        });
     }
 
     [HttpPost("documents/{id:int}/checklist")]

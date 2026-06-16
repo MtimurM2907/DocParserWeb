@@ -32,3 +32,9 @@ public sealed class AuditLogEntryResponse
     public string? Details { get; set; }
     public string? IpAddress { get; set; }
 }
+
+public sealed class AuditLogListResponse
+{
+    public List<AuditLogEntryResponse> Items { get; set; } = new();
+    public int TotalCount { get; set; }
+}

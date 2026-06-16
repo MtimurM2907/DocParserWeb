@@ -54,6 +54,11 @@ export interface AuditLogEntry {
   ipAddress?: string | null;
 }
 
+export interface AuditLogListResponse {
+  items: AuditLogEntry[];
+  totalCount: number;
+}
+
 export interface ExtractedEntities {
   dates: string[];
   money: string[];

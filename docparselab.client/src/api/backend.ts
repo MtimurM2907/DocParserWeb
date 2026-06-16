@@ -1,5 +1,5 @@
 import type {
-  AuditLogEntry,
+  AuditLogListResponse,
   AuthResponse,
   BatchParseResponse,
   ChecklistValidateResult,
@@ -188,19 +188,33 @@ export async function parseBatch(
   });
 }
 
+export type AuditLogQuery = {
+  take?: number;
+  skip?: number;
+  all?: boolean;
+  search?: string;
+  action?: string;
+  sortBy?: 'createdAt' | 'user' | 'action' | 'resource';
+  sortDesc?: boolean;
+};
+
 export async function fetchAuditLog(
   token: string,
-  opts?: { take?: number; all?: boolean },
-): Promise<AuditLogEntry[]> {
+  opts?: AuditLogQuery,
+): Promise<AuditLogListResponse> {
   const q = new URLSearchParams();
-  const take = opts?.take ?? 100;
-  q.set('take', String(take));
+  q.set('take', String(opts?.take ?? 200));
+  if (opts?.skip) q.set('skip', String(opts.skip));
   if (opts?.all) q.set('all', 'true');
+  if (opts?.search?.trim()) q.set('search', opts.search.trim());
+  if (opts?.action?.trim()) q.set('action', opts.action.trim());
+  if (opts?.sortBy) q.set('sortBy', opts.sortBy);
+  if (opts?.sortDesc === false) q.set('sortDesc', 'false');
   const response = await fetch(`/api/enterprise/audit?${q}`, { headers: authHeaders(token) });
   if (!response.ok) {
     throw new Error(await readResponseError(response, 'Не удалось загрузить журнал'));
   }
-  return response.json() as Promise<AuditLogEntry[]>;
+  return response.json() as Promise<AuditLogListResponse>;
 }
 
 export async function fetchDocumentEntities(token: string, docId: number): Promise<ExtractedEntities> {

@@ -1,0 +1,230 @@
+// DocParseLab — схема PostgreSQL для https://dbdiagram.io
+// Импорт: dbdiagram.io → Import → Paste DBML
+
+Project DocParseLab {
+  database_type: 'PostgreSQL'
+  Note: 'DocParseLab — реестр документов, согласование, подпись, аудит'
+}
+
+// ─── Справочники и пользователи ─────────────────────────────────────────────
+
+Table Departments {
+  Id int [pk, increment, note: 'PK']
+  Name text [not null, unique, note: 'Название подразделения']
+}
+
+Table Users {
+  Id int [pk, increment]
+  Email text [not null, unique]
+  DisplayName text
+  Role text [not null, note: 'Admin | Manager | Employee | Viewer']
+  DepartmentId int [note: 'FK → Departments']
+  PasswordHash text [not null]
+  PasswordSalt text [not null]
+  CreatedAt timestamptz [not null]
+}
+
+// ─── Документ ───────────────────────────────────────────────────────────────
+
+Table ParsedDocuments {
+  Id int [pk, increment]
+  FileName text [not null]
+  Title text [note: 'Название в реестре']
+  OriginalFileType text [not null, note: 'pdf | docx']
+  DocumentType text [not null, note: 'general, letter, memo, order, contract, instruction, regulation']
+  ProcessingProfile text [not null, default: 'general']
+  DataClassification text [not null, note: 'Public | Confidential']
+  WorkflowStatus text [not null, note: 'Draft → OnApproval → Approved → Signed → Archived']
+  CurrentApproverUserId int [note: 'Текущий согласующий']
+  WorkflowComment text
+  SubmittedAt timestamptz
+  WorkflowCompletedAt timestamptz
+  ApprovalDueAt timestamptz
+  OriginalStorageKey text [note: 'Путь к файлу в Data/uploads']
+  DepartmentId int
+  ResponsibleUserId int
+  Tags text [note: 'Теги через запятую']
+  OwnerId int
+  UploadedAt timestamptz [not null]
+  FullText text [not null, note: 'Извлечённый/актуальный текст']
+  RawExtractedText text [note: 'До постобработки']
+  EditedText text
+  EditedAt timestamptz
+  StructuredJson text [not null, note: 'JSON от GigaChat']
+  AiSummary text
+  EditLockedByUserId int
+  EditLockExpiresAt timestamptz
+  RowVersion bytea [not null, note: 'Optimistic concurrency (xmin)']
+
+  indexes {
+    WorkflowStatus
+  }
+}
+
+// ─── Согласование и workflow ─────────────────────────────────────────────────
+
+Table DocumentApprovalSteps {
+  Id int [pk, increment]
+  DocumentId int [not null]
+  StepOrder int [not null, note: 'Порядок в маршруте']
+  ApproverUserId int [not null]
+  Status text [not null, note: 'Pending | Approved | Rejected']
+  Comment text
+  ActedAt timestamptz
+
+  indexes {
+    (DocumentId, StepOrder) [unique]
+  }
+}
+
+Table DocumentWorkflowHistory {
+  Id int [pk, increment]
+  DocumentId int [not null]
+  UserId int
+  Action text [not null, note: 'Submitted, StepApproved, Approved, Rejected, …']
+  Comment text
+  CreatedAt timestamptz [not null]
+
+  indexes {
+    CreatedAt
+  }
+}
+
+// ─── Версии, шаринг, комментарии ─────────────────────────────────────────────
+
+Table DocumentVersions {
+  Id int [pk, increment]
+  DocumentId int [not null]
+  VersionNumber int [not null]
+  Text text [not null]
+  ChangeType text [not null, note: 'import | edit | restore']
+  CreatedAt timestamptz [not null]
+  CreatedByUserId int
+
+  indexes {
+    (DocumentId, VersionNumber) [unique]
+  }
+}
+
+Table DocumentShares {
+  Id int [pk, increment]
+  DocumentId int [not null]
+  FromUserId int [not null]
+  ToUserId int [not null]
+  SharedAt timestamptz [not null]
+
+  indexes {
+    (DocumentId, ToUserId) [unique]
+  }
+}
+
+Table DocumentComments {
+  Id int [pk, increment]
+  DocumentId int [not null]
+  UserId int [not null]
+  Text text [not null]
+  CreatedAt timestamptz [not null]
+}
+
+// ─── Подпись ─────────────────────────────────────────────────────────────────
+
+Table DocumentSignatures {
+  Id int [pk, increment]
+  DocumentId int [not null]
+  SignedByUserId int [not null]
+  TextHashSha256 text [not null, note: 'SHA-256 текста на момент подписи']
+  SignedAt timestamptz [not null]
+  SignerEmailSnapshot text [not null]
+  SignerDisplayNameSnapshot text
+  SignerRoleSnapshot text [not null]
+  Comment text
+  SignatureKind text [not null, note: 'internal | external']
+  CertificateSubject text
+  CertificateThumbprint text
+  ExternalPayloadBase64 text
+  ExternalCryptoVerified boolean
+
+  indexes {
+    (DocumentId, SignedAt)
+  }
+}
+
+// ─── Уведомления и журналы ───────────────────────────────────────────────────
+
+Table UserNotifications {
+  Id int [pk, increment]
+  UserId int [not null]
+  Title text [not null]
+  Body text [not null]
+  DocumentId int [note: 'Ссылка на документ (без FK в модели)']
+  IsRead boolean [not null]
+  CreatedAt timestamptz [not null]
+
+  indexes {
+    (UserId, IsRead, CreatedAt)
+  }
+}
+
+Table DocumentAccessLogs {
+  Id int [pk, increment]
+  DocumentId int [not null]
+  UserId int
+  Action text [not null, note: 'view | export | …']
+  CreatedAt timestamptz [not null]
+  IpAddress text
+
+  indexes {
+    (DocumentId, CreatedAt)
+  }
+}
+
+Table AuditLogEntries {
+  Id int [pk, increment]
+  CreatedAt timestamptz [not null]
+  UserId int
+  UserEmailSnapshot text
+  Action text [not null]
+  Resource text
+  Details text
+  IpAddress text
+
+  indexes {
+    CreatedAt
+  }
+}
+
+// ─── Связи ───────────────────────────────────────────────────────────────────
+
+Ref: Users.DepartmentId > Departments.Id [delete: set null]
+
+Ref: ParsedDocuments.OwnerId > Users.Id [delete: set null]
+Ref: ParsedDocuments.DepartmentId > Departments.Id [delete: set null]
+Ref: ParsedDocuments.ResponsibleUserId > Users.Id [delete: set null]
+Ref: ParsedDocuments.CurrentApproverUserId > Users.Id [delete: set null]
+Ref: ParsedDocuments.EditLockedByUserId > Users.Id [delete: set null]
+
+Ref: DocumentApprovalSteps.DocumentId > ParsedDocuments.Id [delete: cascade]
+Ref: DocumentApprovalSteps.ApproverUserId > Users.Id [delete: restrict]
+
+Ref: DocumentWorkflowHistory.DocumentId > ParsedDocuments.Id [delete: cascade]
+Ref: DocumentWorkflowHistory.UserId > Users.Id [delete: set null]
+
+Ref: DocumentVersions.DocumentId > ParsedDocuments.Id [delete: cascade]
+Ref: DocumentVersions.CreatedByUserId > Users.Id [delete: set null]
+
+Ref: DocumentShares.DocumentId > ParsedDocuments.Id [delete: cascade]
+Ref: DocumentShares.FromUserId > Users.Id [delete: restrict]
+Ref: DocumentShares.ToUserId > Users.Id [delete: restrict]
+
+Ref: DocumentComments.DocumentId > ParsedDocuments.Id [delete: cascade]
+Ref: DocumentComments.UserId > Users.Id [delete: restrict]
+
+Ref: DocumentSignatures.DocumentId > ParsedDocuments.Id [delete: cascade]
+Ref: DocumentSignatures.SignedByUserId > Users.Id [delete: restrict]
+
+Ref: UserNotifications.UserId > Users.Id [delete: cascade]
+
+Ref: DocumentAccessLogs.DocumentId > ParsedDocuments.Id [delete: cascade]
+Ref: DocumentAccessLogs.UserId > Users.Id [delete: set null]
+
+Ref: AuditLogEntries.UserId > Users.Id [delete: set null]
